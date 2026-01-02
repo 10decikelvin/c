@@ -46,8 +46,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "edf", git = "https://github.com/10decikelvin/edf" },
-    { name = "egf", git = "https://github.com/10decikelvin/egf" },
+    { name = "edf", git = "https://github.com/Edexia/edf" },
+    { name = "egf", git = "https://github.com/Edexia/egf" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "scikit-learn", specifier = ">=1.5" },
     { name = "watchdog", specifier = ">=4.0" },
@@ -77,7 +77,7 @@ wheels = [
 [[package]]
 name = "edf"
 version = "0.3.0"
-source = { git = "https://github.com/10decikelvin/edf#622f1083424bdc1259fecadd685fe20d9dcd32b2" }
+source = { git = "https://github.com/Edexia/edf#1306d3a01f23d6ee4b42aae7039c5915149123bc" }
 dependencies = [
     { name = "pydantic" },
 ]
@@ -85,7 +85,7 @@ dependencies = [
 [[package]]
 name = "egf"
 version = "0.3.1"
-source = { git = "https://github.com/10decikelvin/egf#645fa1fcf89fe02b6ecf421a50b8e4c2a01f25b7" }
+source = { git = "https://github.com/Edexia/egf#56055a7d4c141e6a13e3fc23986d2800ce4737f4" }
 dependencies = [
     { name = "edf" },
     { name = "fastapi" },
