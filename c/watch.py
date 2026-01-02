@@ -2,6 +2,7 @@
 
 import sys
 import time
+import webbrowser
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -148,6 +149,7 @@ def run_watch_mode(
     base_egf_path: Path,
     edf_directory: Path,
     noise_assumption: str = "expected",
+    quiet: bool = False,
 ) -> None:
     """Run watch mode, analyzing new EGF files against a base file."""
     print(f"Loading base EGF: {base_egf_path}")
@@ -175,6 +177,10 @@ def run_watch_mode(
         else:
             print("Result: New file appears SIMILAR to base")
         print(f"{'='*60}\n")
+
+        # Open in browser
+        if not quiet:
+            webbrowser.open(Path(output_path).resolve().as_uri())
 
     handler = EGFWatcher(base_egf, edf_cache, noise_assumption, output_callback)
     observer = Observer()

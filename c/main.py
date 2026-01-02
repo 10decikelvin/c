@@ -13,6 +13,7 @@ Examples:
 
 import argparse
 import sys
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -83,6 +84,12 @@ Examples:
         type=int,
         default=42,
         help="Random seed for bootstrap (default: 42)",
+    )
+
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        help="Don't open HTML report in browser",
     )
 
     return parser.parse_args()
@@ -173,6 +180,7 @@ def run_analysis(
     noise_assumption: str,
     output_path: Optional[Path],
     seed: int,
+    quiet: bool = False,
 ) -> None:
     """Run the main analysis."""
     print(f"Loading {len(egf_files)} EGF file(s)...")
@@ -266,6 +274,10 @@ def run_analysis(
     save_html_report(result, output_path, noise_assumption)
     print(f"Output: {output_path}")
 
+    # Open in browser
+    if not quiet:
+        webbrowser.open(output_path.resolve().as_uri())
+
     print("\n" + "="*60)
     print("Results Summary")
     print("="*60)
@@ -321,7 +333,7 @@ def main() -> None:
             edf_folder = Path.cwd()
 
         from .watch import run_watch_mode
-        run_watch_mode(base_path, edf_folder, args.noise)
+        run_watch_mode(base_path, edf_folder, args.noise, args.quiet)
 
     else:
         egf_files, edf_folder = find_egf_files_in_args(args.paths)
@@ -333,7 +345,7 @@ def main() -> None:
 
         output_path = Path(args.output) if args.output else None
 
-        run_analysis(egf_files, edf_folder, args.noise, output_path, args.seed)
+        run_analysis(egf_files, edf_folder, args.noise, output_path, args.seed, args.quiet)
 
 
 if __name__ == "__main__":
