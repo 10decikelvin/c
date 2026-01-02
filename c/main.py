@@ -20,8 +20,11 @@ from typing import Optional
 
 from .core import (
     EGFData,
+    Essay,
     load_egf_data,
     load_edf_teacher_noise,
+    load_edf_ground_truth,
+    build_essays,
     analyze_multiple_egf,
     get_default_teacher_noise,
     find_matching_edf,
@@ -252,16 +255,20 @@ def run_analysis(
     first_egf = egf_data_list[0]
     edf_path = find_matching_edf(first_egf, edf_cache)
 
-    teacher_noise_all = get_default_teacher_noise()
-    edf_name = None
-    if edf_path:
-        print(f"\nLoading teacher noise from: {edf_path.name}")
-        try:
-            edf_data = load_edf_teacher_noise(edf_path)
-            teacher_noise_all = edf_data.teacher_noise
-            edf_name = edf_data.name
-        except Exception as e:
-            print(f"  Warning: Failed to load EDF, using defaults: {e}", file=sys.stderr)
+    if not edf_path:
+        print("Error: No matching EDF found. EDF is required for ground truth.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"\nLoading teacher noise from: {edf_path.name}")
+    edf_data = load_edf_teacher_noise(edf_path)
+    teacher_noise_all = edf_data.teacher_noise
+    edf_name = edf_data.name
+
+    print(f"Loading ground truth from: {edf_path.name}")
+    ground_truth = load_edf_ground_truth(edf_path)
+
+    # Build essays by combining predicted grades (EGF) with ground truth (EDF)
+    essays_list = [build_essays(egf, ground_truth) for egf in egf_data_list]
 
     teacher_noise = teacher_noise_all.get(noise_assumption, teacher_noise_all["expected"])
 
@@ -271,6 +278,7 @@ def run_analysis(
 
     result = analyze_multiple_egf(
         egf_data_list,
+        essays_list,
         teacher_noise,
         stability_vectors,
         edf_name,

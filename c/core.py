@@ -24,14 +24,22 @@ from .edf_cache import EDFCache
 
 @dataclass
 class EGFData:
-    """Data extracted from an EGF file."""
+    """Data extracted from an EGF file. Contains predicted grades only."""
     path: Path
     name: str
     source_hash: str
     source_task_id: str
     max_grade: int
-    grades: list[dict[str, Any]]
+    grades: list[dict[str, Any]]  # Each dict has 'predicted' and 'submission_id' only
     grading_description: Optional[str] = None
+
+
+@dataclass
+class Essay:
+    """An essay with predicted grade (from EGF) and ground truth (from EDF)."""
+    submission_id: str
+    predicted: int
+    ground_truth: int
 
 
 @dataclass
@@ -133,7 +141,6 @@ def load_egf_data(egf_path: Path) -> EGFData:
                 if grade.grade is not None:
                     grades.append({
                         'predicted': grade.grade,
-                        'ground_truth': grade.metadata.get("ground_truth") if grade.metadata else None,
                         'submission_id': grade.submission_id,
                     })
 
@@ -235,7 +242,8 @@ def get_default_teacher_noise() -> dict[str, TeacherNoiseModel]:
     }
 
 
-def analyze_egf(
+def analyze_essays(
+    essays: list[Essay],
     egf_data: EGFData,
     teacher_noise: TeacherNoiseModel,
     stability_vector: StabilityVector,
@@ -243,13 +251,12 @@ def analyze_egf(
     noise_assumption: str = "expected",
     seed: int = 42,
 ) -> AnalysisResult:
-    """Analyze a single EGF file and compute QWK with variance components."""
-    valid_grades = [g for g in egf_data.grades if g['ground_truth'] is not None]
-    if not valid_grades:
-        raise ValueError(f"No valid grades with ground truth in {egf_data.name}")
+    """Analyze essays and compute QWK with variance components."""
+    if not essays:
+        raise ValueError(f"No essays with ground truth for {egf_data.name}")
 
-    predicted = [g['predicted'] for g in valid_grades]
-    ground_truth = [g['ground_truth'] for g in valid_grades]
+    predicted = [e.predicted for e in essays]
+    ground_truth = [e.ground_truth for e in essays]
 
     raw_qwk = compute_qwk(predicted, ground_truth)
     exact_acc = compute_exact_accuracy(predicted, ground_truth)
@@ -266,7 +273,7 @@ def analyze_egf(
         raw_qwk=raw_qwk,
         exact_accuracy=exact_acc,
         near_accuracy=near_acc,
-        n_essays=len(valid_grades),
+        n_essays=len(essays),
         gt_noise_ci=gt_ci,
         grading_noise_ci=grading_ci,
         sampling_ci=sampling_ci,
@@ -285,6 +292,7 @@ def analyze_egf(
 
 def analyze_multiple_egf(
     egf_data_list: list[EGFData],
+    essays_list: list[list[Essay]],
     teacher_noise: TeacherNoiseModel,
     stability_vectors: dict[int, StabilityVector],
     edf_name: Optional[str] = None,
@@ -296,14 +304,14 @@ def analyze_multiple_egf(
     legend = {}
     individual_results = []
 
-    for idx, egf_data in enumerate(egf_data_list):
+    for idx, (egf_data, essays) in enumerate(zip(egf_data_list, essays_list)):
         label = chr(ord('A') + idx) if idx < 26 else f"A{idx - 25}"
         labels.append(label)
         legend[label] = egf_data.name
 
         sv = stability_vectors.get(idx, get_default_stability_vector())
-        result = analyze_egf(
-            egf_data, teacher_noise, sv, edf_name, noise_assumption, seed
+        result = analyze_essays(
+            essays, egf_data, teacher_noise, sv, edf_name, noise_assumption, seed
         )
         individual_results.append(result)
 
@@ -311,8 +319,9 @@ def analyze_multiple_egf(
     if len(egf_data_list) > 1:
         if all_same_source(egf_data_list):
             comparison = compute_comparison(
-                egf_data_list, teacher_noise, stability_vectors, seed
+                essays_list, teacher_noise, stability_vectors, seed
             )
+            comparison.egf_names = [egf.name for egf in egf_data_list]
 
     return FullAnalysisResult(
         individual_results=individual_results,
@@ -338,18 +347,16 @@ def all_same_source(egf_data_list: list[EGFData]) -> bool:
 
 
 def compute_comparison(
-    egf_data_list: list[EGFData],
+    essays_list: list[list[Essay]],
     teacher_noise: TeacherNoiseModel,
     stability_vectors: dict[int, StabilityVector],
     seed: int = 42,
 ) -> ComparisonResult:
-    """Compute pairwise comparison between multiple EGF files."""
+    """Compute pairwise comparison between multiple sets of essays."""
+    # Build grade dicts keyed by submission_id
     file_grades: list[dict[str, tuple[int, int]]] = []
-    for egf_data in egf_data_list:
-        grades_dict = {}
-        for g in egf_data.grades:
-            if g['ground_truth'] is not None:
-                grades_dict[g['submission_id']] = (g['predicted'], g['ground_truth'])
+    for essays in essays_list:
+        grades_dict = {e.submission_id: (e.predicted, e.ground_truth) for e in essays}
         file_grades.append(grades_dict)
 
     common_ids = set(file_grades[0].keys())
@@ -371,7 +378,7 @@ def compute_comparison(
     )
 
     return ComparisonResult(
-        egf_names=[egf.name for egf in egf_data_list],
+        egf_names=[],  # Names set by caller
         win_matrix=win_matrix,
         avg_qwk=avg_qwk,
         n_iterations=2000,
@@ -419,6 +426,30 @@ def load_edf_submissions_detail(edf_path: Path, noise_assumption: str = "expecte
             return submissions
     except Exception as e:
         raise ValueError(f"Failed to load EDF submissions from {edf_path}: {e}")
+
+
+def load_edf_ground_truth(edf_path: Path) -> dict[str, int]:
+    """Load ground truth grades from an EDF file, keyed by submission_id."""
+    try:
+        with EDF.open(edf_path) as edf:
+            return {sub.id: sub.grade for sub in edf.submissions if sub.grade is not None}
+    except Exception as e:
+        raise ValueError(f"Failed to load EDF ground truth from {edf_path}: {e}")
+
+
+def build_essays(egf_data: EGFData, ground_truth: dict[str, int]) -> list[Essay]:
+    """Build Essay list by combining predicted grades from EGF with ground truth from EDF."""
+    essays = []
+    for g in egf_data.grades:
+        sid = g['submission_id']
+        gt = ground_truth.get(sid)
+        if gt is not None:
+            essays.append(Essay(
+                submission_id=sid,
+                predicted=g['predicted'],
+                ground_truth=gt,
+            ))
+    return essays
 
 
 def load_egf_grades_detail(egf_path: Path) -> dict[str, GradeDetail]:

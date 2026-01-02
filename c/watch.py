@@ -11,9 +11,12 @@ from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 
 from .core import (
     EGFData,
+    Essay,
     load_egf_data,
     load_edf_teacher_noise,
-    analyze_egf,
+    load_edf_ground_truth,
+    build_essays,
+    analyze_essays,
     get_default_teacher_noise,
     find_matching_edf,
     load_edf_submissions_detail,
@@ -32,26 +35,24 @@ class EGFWatcher(FileSystemEventHandler):
     def __init__(
         self,
         base_egf: EGFData,
-        edf_cache: EDFCache,
+        edf_path: Path,
+        ground_truth: dict[str, int],
         noise_assumption: str,
         output_callback: Callable[[str, float], None],
     ):
         self.base_egf = base_egf
-        self.edf_cache = edf_cache
+        self.base_essays = build_essays(base_egf, ground_truth)
+        self.edf_path = edf_path
+        self.ground_truth = ground_truth
         self.noise_assumption = noise_assumption
         self.output_callback = output_callback
 
-        self.edf_path = find_matching_edf(base_egf, edf_cache)
-        if self.edf_path:
-            edf_data = load_edf_teacher_noise(self.edf_path)
-            self.teacher_noise = edf_data.teacher_noise.get(
-                noise_assumption,
-                get_default_teacher_noise()[noise_assumption]
-            )
-            self.edf_name = edf_data.name
-        else:
-            self.teacher_noise = get_default_teacher_noise()[noise_assumption]
-            self.edf_name = None
+        edf_data = load_edf_teacher_noise(self.edf_path)
+        self.teacher_noise = edf_data.teacher_noise.get(
+            noise_assumption,
+            get_default_teacher_noise()[noise_assumption]
+        )
+        self.edf_name = edf_data.name
 
         self.stability_vector = get_default_stability_vector()
 
@@ -76,16 +77,19 @@ class EGFWatcher(FileSystemEventHandler):
             print(f"Skipping {path.name}: different source EDF", file=sys.stderr)
             return
 
+        # Build essays by combining predicted grades (EGF) with ground truth (EDF)
+        new_essays = build_essays(new_egf, self.ground_truth)
+
         print(f"Analyzing {path.name}...")
-        p_win = self._compute_p_win(new_egf)
-        output_path = self._generate_output(new_egf, p_win)
+        p_win = self._compute_p_win(new_essays)
+        output_path = self._generate_output(new_egf, new_essays, p_win)
 
         self.output_callback(str(output_path), p_win)
 
-    def _compute_p_win(self, new_egf: EGFData) -> float:
-        """Compute P(new_egf > base_egf)."""
-        base_grades = {g['submission_id']: g for g in self.base_egf.grades if g['ground_truth'] is not None}
-        new_grades = {g['submission_id']: g for g in new_egf.grades if g['ground_truth'] is not None}
+    def _compute_p_win(self, new_essays: list[Essay]) -> float:
+        """Compute P(new > base)."""
+        base_grades = {e.submission_id: e for e in self.base_essays}
+        new_grades = {e.submission_id: e for e in new_essays}
 
         common_ids = sorted(set(base_grades.keys()) & set(new_grades.keys()))
         if not common_ids:
@@ -93,13 +97,13 @@ class EGFWatcher(FileSystemEventHandler):
 
         by_idx = {
             0: (
-                [base_grades[sid]['predicted'] for sid in common_ids],
-                [base_grades[sid]['ground_truth'] for sid in common_ids],
+                [base_grades[sid].predicted for sid in common_ids],
+                [base_grades[sid].ground_truth for sid in common_ids],
                 common_ids,
             ),
             1: (
-                [new_grades[sid]['predicted'] for sid in common_ids],
-                [new_grades[sid]['ground_truth'] for sid in common_ids],
+                [new_grades[sid].predicted for sid in common_ids],
+                [new_grades[sid].ground_truth for sid in common_ids],
                 common_ids,
             ),
         }
@@ -112,16 +116,16 @@ class EGFWatcher(FileSystemEventHandler):
 
         return win_matrix.get((1, 0), 0.5)
 
-    def _generate_output(self, new_egf: EGFData, p_win: float) -> Path:
+    def _generate_output(self, new_egf: EGFData, new_essays: list[Essay], p_win: float) -> Path:
         """Generate HTML output for the comparison."""
-        from .core import analyze_egf, FullAnalysisResult, ComparisonResult
+        from .core import FullAnalysisResult, ComparisonResult
 
-        base_result = analyze_egf(
-            self.base_egf, self.teacher_noise, self.stability_vector,
+        base_result = analyze_essays(
+            self.base_essays, self.base_egf, self.teacher_noise, self.stability_vector,
             self.edf_name, self.noise_assumption
         )
-        new_result = analyze_egf(
-            new_egf, self.teacher_noise, self.stability_vector,
+        new_result = analyze_essays(
+            new_essays, new_egf, self.teacher_noise, self.stability_vector,
             self.edf_name, self.noise_assumption
         )
 
@@ -130,7 +134,7 @@ class EGFWatcher(FileSystemEventHandler):
             win_matrix={(0, 1): 1 - p_win, (1, 0): p_win, (0, 0): 0.5, (1, 1): 0.5},
             avg_qwk={0: base_result.qwk_result.raw_qwk, 1: new_result.qwk_result.raw_qwk},
             n_iterations=1000,
-            n_common_essays=len([g for g in self.base_egf.grades if g['ground_truth'] is not None]),
+            n_common_essays=len(self.base_essays),
         )
 
         full_result = FullAnalysisResult(
@@ -185,10 +189,13 @@ def run_watch_mode(
     edf_cache = EDFCache(edf_directory)
 
     edf_path = find_matching_edf(base_egf, edf_cache)
-    if edf_path:
-        print(f"Found matching EDF: {edf_path.name}")
-    else:
-        print("Warning: No matching EDF found, using default teacher noise")
+    if not edf_path:
+        print("Error: No matching EDF found. EDF is required for ground truth.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Found matching EDF: {edf_path.name}")
+    print(f"Loading ground truth from: {edf_path.name}")
+    ground_truth = load_edf_ground_truth(edf_path)
 
     watch_dir = edf_directory
 
@@ -208,7 +215,7 @@ def run_watch_mode(
         if not quiet:
             webbrowser.open(Path(output_path).resolve().as_uri())
 
-    handler = EGFWatcher(base_egf, edf_cache, noise_assumption, output_callback)
+    handler = EGFWatcher(base_egf, edf_path, ground_truth, noise_assumption, output_callback)
     observer = Observer()
     observer.schedule(handler, str(watch_dir), recursive=True)
 
