@@ -628,8 +628,8 @@ def generate_grades_table_css() -> str:
         .modal-content {
             background: white;
             border-radius: 12px;
-            width: 90%;
-            max-width: 900px;
+            width: 95%;
+            max-width: 1400px;
             max-height: 90vh;
             overflow: hidden;
             display: flex;
@@ -948,7 +948,8 @@ def generate_grades_table_css() -> str:
             background: var(--gray-50);
             border-radius: 8px;
             padding: 1rem;
-            max-height: 400px;
+            min-height: 300px;
+            max-height: 600px;
             overflow-y: auto;
         }
 
