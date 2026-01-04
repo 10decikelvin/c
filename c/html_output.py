@@ -936,21 +936,19 @@ def generate_grades_table_css() -> str:
 
         /* LLM Input section */
         .llm-input-section {
-            margin-top: 0.75rem;
+            margin-top: 1.5rem;
         }
-        .llm-input-section h5 {
+        .llm-input-section h5,
+        .llm-json-section h5 {
             font-size: 0.8rem;
             color: var(--gray-600);
             margin-bottom: 0.5rem;
             font-weight: 500;
         }
-        .llm-input-content {
-            background: var(--gray-50);
-            border-radius: 8px;
-            padding: 1rem;
-            min-height: 300px;
-            max-height: 600px;
-            overflow-y: auto;
+
+        /* LLM JSON section */
+        .llm-json-section {
+            margin-top: 1.5rem;
         }
 
         /* PDF Viewer */
@@ -996,6 +994,73 @@ def generate_grades_table_css() -> str:
             align-items: center;
             justify-content: center;
             height: 200px;
+        }
+
+        /* Markdown Source View (VSCode-style) */
+        .markdown-source {
+            background: var(--gray-900);
+            color: #d4d4d4;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: ui-monospace, 'Cascadia Code', 'Fira Code', Consolas, monospace;
+            font-size: 0.8rem;
+            line-height: 1.6;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .markdown-source .md-header {
+            color: #569cd6;
+            font-weight: bold;
+        }
+        .markdown-source .md-bold {
+            color: #ce9178;
+            font-weight: bold;
+        }
+        .markdown-source .md-italic {
+            color: #ce9178;
+            font-style: italic;
+        }
+        .markdown-source .md-code {
+            color: #d7ba7d;
+            background: rgba(255,255,255,0.05);
+            border-radius: 3px;
+        }
+        .markdown-source .md-code-block {
+            color: #d7ba7d;
+        }
+        .markdown-source .md-link {
+            color: #4ec9b0;
+        }
+        .markdown-source .md-list {
+            color: #6a9955;
+        }
+        .markdown-source .md-blockquote {
+            color: #608b4e;
+        }
+        .markdown-source .md-hr {
+            color: #6a9955;
+        }
+
+        /* LLM Output section */
+        .llm-output-section {
+            margin-bottom: 1rem;
+        }
+        .llm-output-section h5 {
+            font-size: 0.8rem;
+            color: var(--gray-600);
+            margin-bottom: 0.5rem;
+            font-weight: 500;
+        }
+        .llm-output-content {
+            background: var(--gray-50);
+            border-radius: 8px;
+            padding: 1rem;
+            min-height: 200px;
+            max-height: 500px;
+            overflow-y: auto;
         }
     '''
 
@@ -1053,7 +1118,7 @@ def generate_grades_table_js(grades_table: GradesTableData) -> str:
 (function() {{
     const gradesData = JSON.parse(document.getElementById('gradesData').textContent);
 
-    // Simple Markdown Parser
+    // Simple Markdown Parser (for essay/justification content)
     function parseMarkdown(md) {{
         if (!md) return '<em class="text-gray">No content available</em>';
 
@@ -1100,6 +1165,116 @@ def generate_grades_table_js(grades_table: GradesTableData) -> str:
         html = html.replace(/<\\/ul>\\s*<ul>/g, '');
 
         return html;
+    }}
+
+    // VSCode-style Markdown Syntax Highlighter (shows raw text with colors)
+    function highlightMarkdownSource(md) {{
+        if (!md) return '<em class="text-gray">No content available</em>';
+
+        let html = md
+            // Escape HTML first
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+
+        // Code blocks (fenced) - must be done first
+        html = html.replace(/(```[\\s\\S]*?```)/g, '<span class="md-code-block">$1</span>');
+
+        // Headers (only if not inside code block)
+        html = html.replace(/^(#{1,6} .*)$/gm, '<span class="md-header">$1</span>');
+
+        // Horizontal rules
+        html = html.replace(/^([-*_]{{3,}})$/gm, '<span class="md-hr">$1</span>');
+
+        // Bold with ** or __
+        html = html.replace(/(\\*\\*[^*]+\\*\\*)/g, '<span class="md-bold">$1</span>');
+        html = html.replace(/(__[^_]+__)/g, '<span class="md-bold">$1</span>');
+
+        // Italic with * or _ (avoiding already matched bold)
+        html = html.replace(/(?<!\\*)\\*([^*]+)\\*(?!\\*)/g, '<span class="md-italic">*$1*</span>');
+        html = html.replace(/(?<!_)_([^_]+)_(?!_)/g, '<span class="md-italic">_$1_</span>');
+
+        // Inline code (backticks, not inside code blocks)
+        html = html.replace(/(`[^`]+`)/g, '<span class="md-code">$1</span>');
+
+        // Links [text](url)
+        html = html.replace(/(\\[[^\\]]+\\]\\([^)]+\\))/g, '<span class="md-link">$1</span>');
+
+        // List items
+        html = html.replace(/^([\\*\\-+] )/gm, '<span class="md-list">$1</span>');
+        html = html.replace(/^(\\d+\\. )/gm, '<span class="md-list">$1</span>');
+
+        // Blockquotes
+        html = html.replace(/^(&gt; .*)/gm, '<span class="md-blockquote">$1</span>');
+
+        return '<div class="markdown-source">' + html + '</div>';
+    }}
+
+    // Extract LLM output from raw_json
+    function extractLLMOutput(rawJson) {{
+        if (!rawJson) return null;
+
+        // Try common structures for LLM output
+        // 1. Check for 'output' field
+        if (rawJson.output) {{
+            if (typeof rawJson.output === 'string') return rawJson.output;
+            if (rawJson.output.content) return extractContentText(rawJson.output.content);
+            if (rawJson.output.text) return rawJson.output.text;
+            if (rawJson.output.message) return extractMessageContent(rawJson.output.message);
+        }}
+
+        // 2. Check for 'response' field
+        if (rawJson.response) {{
+            if (typeof rawJson.response === 'string') return rawJson.response;
+            if (rawJson.response.content) return extractContentText(rawJson.response.content);
+            if (rawJson.response.text) return rawJson.response.text;
+            if (rawJson.response.message) return extractMessageContent(rawJson.response.message);
+        }}
+
+        // 3. Check for 'completion' field
+        if (rawJson.completion) {{
+            if (typeof rawJson.completion === 'string') return rawJson.completion;
+        }}
+
+        // 4. Check for 'choices' (OpenAI style)
+        if (rawJson.choices && Array.isArray(rawJson.choices) && rawJson.choices.length > 0) {{
+            const choice = rawJson.choices[0];
+            if (choice.message) return extractMessageContent(choice.message);
+            if (choice.text) return choice.text;
+        }}
+
+        // 5. Check for 'content' directly (Anthropic style)
+        if (rawJson.content) {{
+            return extractContentText(rawJson.content);
+        }}
+
+        // 6. Check for 'result' field
+        if (rawJson.result) {{
+            if (typeof rawJson.result === 'string') return rawJson.result;
+            if (rawJson.result.content) return extractContentText(rawJson.result.content);
+        }}
+
+        return null;
+    }}
+
+    // Helper to extract text from content array
+    function extractContentText(content) {{
+        if (typeof content === 'string') return content;
+        if (Array.isArray(content)) {{
+            return content
+                .filter(part => part.type === 'text' || part.text)
+                .map(part => part.text || part)
+                .join('\\n');
+        }}
+        return null;
+    }}
+
+    // Helper to extract content from message object
+    function extractMessageContent(message) {{
+        if (typeof message === 'string') return message;
+        if (message.content) return extractContentText(message.content);
+        if (message.text) return message.text;
+        return null;
     }}
 
     // Format JSON with syntax highlighting
@@ -1201,12 +1376,23 @@ def generate_grades_table_js(grades_table: GradesTableData) -> str:
             callIdEl.textContent = call.call_id;
         }}
 
-        // Update LLM input display
+        // Update LLM output display (comes first)
+        const llmOutputEl = tabContent.querySelector('.llm-output-content');
+        if (llmOutputEl) {{
+            const llmOutput = extractLLMOutput(call.raw_json);
+            if (llmOutput) {{
+                llmOutputEl.innerHTML = highlightMarkdownSource(llmOutput);
+            }} else {{
+                llmOutputEl.innerHTML = '<em class="text-gray">No output data found</em>';
+            }}
+        }}
+
+        // Update LLM input display (comes second)
         const llmInputEl = tabContent.querySelector('.llm-input-content');
         if (llmInputEl) {{
             const llmInput = extractLLMInput(call.raw_json);
             if (llmInput) {{
-                llmInputEl.innerHTML = parseMarkdown(llmInput);
+                llmInputEl.innerHTML = highlightMarkdownSource(llmInput);
             }} else {{
                 llmInputEl.innerHTML = '<em class="text-gray">No input data found</em>';
             }}
@@ -1216,12 +1402,6 @@ def generate_grades_table_js(grades_table: GradesTableData) -> str:
         const jsonEl = tabContent.querySelector('.json-display');
         if (jsonEl) {{
             jsonEl.innerHTML = formatJsonWithHighlighting(call.raw_json);
-        }}
-
-        // Collapse raw JSON section by default when switching
-        const collapsibleSection = tabContent.querySelector('.collapsible-section');
-        if (collapsibleSection) {{
-            collapsibleSection.classList.remove('open');
         }}
 
         // Store current state
@@ -1523,18 +1703,17 @@ def generate_modal_html(grades_table: GradesTableData) -> str:
                     <h4>LLM Calls</h4>
                     <div class="subtabs"></div>
                     <div class="call-id-display"></div>
+                    <div class="llm-output-section">
+                        <h5>LLM Output</h5>
+                        <div class="llm-output-content"></div>
+                    </div>
                     <div class="llm-input-section">
                         <h5>LLM Input</h5>
-                        <div class="llm-input-content markdown-content"></div>
+                        <div class="llm-input-content"></div>
                     </div>
-                    <div class="collapsible-section">
-                        <div class="collapsible-header" onclick="toggleCollapsible(this.parentElement)">
-                            <span class="chevron">▶</span>
-                            <span>Raw JSON</span>
-                        </div>
-                        <div class="collapsible-content">
-                            <pre class="json-display"></pre>
-                        </div>
+                    <div class="llm-json-section">
+                        <h5>Raw JSON</h5>
+                        <pre class="json-display"></pre>
                     </div>
                 </div>
             </div>
