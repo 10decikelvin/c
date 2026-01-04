@@ -507,18 +507,21 @@ def generate_comparison_heatmap(result: FullAnalysisResult) -> str:
                 text = "-"
             else:
                 prob = comp.win_matrix.get((i, j), 0.5)
-                if prob > 0.5:
-                    intensity = (prob - 0.5) * 2
-                    r = int(34 + (34 - 34) * intensity)
-                    g = int(197 + (197 - 197) * intensity)
-                    b = int(94 + (94 - 34) * intensity)
-                    color = f"rgb({r}, {g}, {b})"
+                # Three-point color scale: red (0) → yellow (0.5) → green (1)
+                # Red: rgb(239, 68, 68), Yellow: rgb(234, 179, 8), Green: rgb(34, 197, 94)
+                if prob >= 0.5:
+                    # Interpolate from yellow to green
+                    t = (prob - 0.5) * 2  # 0 to 1 as prob goes from 0.5 to 1
+                    r = int(234 + (34 - 234) * t)
+                    g = int(179 + (197 - 179) * t)
+                    b = int(8 + (94 - 8) * t)
                 else:
-                    intensity = (0.5 - prob) * 2
-                    r = int(239 + (239 - 239) * intensity)
-                    g = int(68 + (68 - 68) * intensity)
-                    b = int(68 + (68 - 68) * intensity)
-                    color = f"rgb({r}, {g}, {b})"
+                    # Interpolate from red to yellow
+                    t = prob * 2  # 0 to 1 as prob goes from 0 to 0.5
+                    r = int(239 + (234 - 239) * t)
+                    g = int(68 + (179 - 68) * t)
+                    b = int(68 + (8 - 68) * t)
+                color = f"rgb({r}, {g}, {b})"
                 text = f"{prob:.0%}"
 
             cells.append(f'''
