@@ -121,10 +121,35 @@ class GradeDetail:
 
 
 @dataclass
+class ComparisonDetail:
+    """A single pairwise comparison from an EGF file."""
+    comparison_id: str
+    submission_a: str  # submission_id OR external anchor ID
+    submission_b: str
+    winner: str  # "A" | "B" | "tie"
+    call_ids: list[str]  # References to LLM calls
+    compared_at: str  # ISO timestamp
+    confidence: float
+    justification: str
+    is_external: bool = False  # True if either submission not in EDF
+
+
+@dataclass
+class ComparisonAccuracyResult:
+    """Comparison accuracy result with confidence intervals."""
+    raw_accuracy: float
+    n_comparisons: int
+    n_excluded_external: int
+    accuracy_ci: tuple[float, float, float]  # (mean, lower, upper)
+
+
+@dataclass
 class GradesTableData:
     """Data structure for the interactive grades table."""
     submissions: dict[str, SubmissionDetail]
     egf_grades: dict[str, dict[str, GradeDetail]]
+    egf_comparisons: dict[str, dict[str, list[ComparisonDetail]]]  # egf_name -> submission_id -> comparisons
+    all_llm_calls: dict[str, dict[str, Any]]  # egf_name -> call_id -> call_data (all calls including comparison calls)
     egf_names: list[str]
     egf_labels: dict[str, str]
     max_grade: int
@@ -140,6 +165,8 @@ class FullAnalysisResult:
     legend: dict[str, str] = field(default_factory=dict)
     grades_table: Optional[GradesTableData] = None
     summary_markdown: Optional[str] = None
+    comparison_accuracy: Optional[dict[str, ComparisonAccuracyResult]] = None  # egf_name -> result
+    comparison_accuracy_matrix: Optional[dict[tuple[int, int], float]] = None  # P(row > col)
 
 
 @dataclass
@@ -332,7 +359,7 @@ def analyze_multiple_egf(
     individual_results = []
 
     for idx, (egf_data, essays) in enumerate(zip(egf_data_list, essays_list)):
-        label = chr(ord('A') + idx) if idx < 26 else f"A{idx - 25}"
+        label = f"EGF{idx + 1}"
         labels.append(label)
         legend[label] = egf_data.name
 
@@ -531,27 +558,135 @@ def load_egf_grades_detail(egf_path: Path) -> dict[str, GradeDetail]:
         raise ValueError(f"Failed to load EGF grades from {egf_path}: {e}")
 
 
+def load_egf_comparisons(
+    egf_path: Path,
+    edf_submission_ids: set[str],
+) -> dict[str, list[ComparisonDetail]]:
+    """Load comparisons from EGF, keyed by submission_id (for submissions involved).
+
+    Returns a dict where each submission_id maps to list of comparisons involving it.
+    Marks comparisons as external if either submission is not in the EDF.
+    """
+    try:
+        with EGF.open(egf_path) as egf:
+            # Build lookup of all LLM calls by call_id (for linking)
+            calls_by_id: dict[str, Any] = {}
+            for call in egf.llm_calls:
+                calls_by_id[call.call_id] = call
+
+            comparisons_by_submission: dict[str, list[ComparisonDetail]] = defaultdict(list)
+
+            # Check if EGF has comparisons attribute
+            if not hasattr(egf, 'comparisons') or egf.comparisons is None:
+                return dict(comparisons_by_submission)
+
+            for comp in egf.comparisons:
+                is_external = (
+                    comp.submission_a not in edf_submission_ids or
+                    comp.submission_b not in edf_submission_ids
+                )
+
+                # Normalize winner to uppercase for consistent comparison
+                winner = comp.winner.upper() if comp.winner else ""
+
+                detail = ComparisonDetail(
+                    comparison_id=comp.comparison_id,
+                    submission_a=comp.submission_a,
+                    submission_b=comp.submission_b,
+                    winner=winner,
+                    call_ids=comp.call_ids if hasattr(comp, 'call_ids') else [],
+                    compared_at=comp.compared_at if hasattr(comp, 'compared_at') else "",
+                    confidence=comp.confidence if hasattr(comp, 'confidence') else 0.0,
+                    justification=comp.justification if hasattr(comp, 'justification') else "",
+                    is_external=is_external,
+                )
+
+                # Add to both submissions' lists
+                comparisons_by_submission[comp.submission_a].append(detail)
+                if comp.submission_b != comp.submission_a:
+                    comparisons_by_submission[comp.submission_b].append(detail)
+
+            return dict(comparisons_by_submission)
+    except Exception as e:
+        # If comparisons can't be loaded, return empty (they're optional)
+        return {}
+
+
+def build_comparison_tuples(
+    comparisons: list[ComparisonDetail],
+    ground_truth: dict[str, int],
+) -> list[tuple[int, int, str]]:
+    """Convert comparisons to (gt_a, gt_b, winner) tuples for bootstrap.
+
+    Filters out external comparisons and comparisons where GT is missing.
+    """
+    tuples = []
+    for comp in comparisons:
+        if comp.is_external:
+            continue
+        gt_a = ground_truth.get(comp.submission_a)
+        gt_b = ground_truth.get(comp.submission_b)
+        if gt_a is not None and gt_b is not None:
+            tuples.append((gt_a, gt_b, comp.winner))
+    return tuples
+
+
+def load_egf_all_llm_calls(egf_path: Path) -> dict[str, dict]:
+    """Load all LLM calls from an EGF file, keyed by call_id.
+
+    Returns a dict mapping call_id -> call data dict.
+    This includes all calls (grading calls, comparison calls, etc.)
+    """
+    try:
+        with EGF.open(egf_path) as egf:
+            calls = {}
+            for call in egf.llm_calls:
+                calls[call.call_id] = {
+                    'call_id': call.call_id,
+                    'raw_json': call.to_dict(),
+                }
+            return calls
+    except Exception:
+        return {}
+
+
 def build_grades_table_data(
     edf_submissions: dict[str, SubmissionDetail],
     egf_grades_list: list[tuple[str, dict[str, GradeDetail]]],
     labels: list[str],
     max_grade: int,
     noise_assumption: str,
+    egf_comparisons_list: Optional[list[tuple[str, dict[str, list[ComparisonDetail]]]]] = None,
+    egf_all_llm_calls_list: Optional[list[tuple[str, dict[str, dict]]]] = None,
 ) -> GradesTableData:
     """Build combined grades table data from EDF submissions and EGF grades."""
     egf_grades = {}
+    egf_comparisons = {}
+    all_llm_calls = {}
     egf_names = []
     egf_labels = {}
 
     for idx, (egf_name, grades) in enumerate(egf_grades_list):
         egf_names.append(egf_name)
         egf_grades[egf_name] = grades
-        label = labels[idx] if idx < len(labels) else chr(ord('A') + idx)
+        label = labels[idx] if idx < len(labels) else f"EGF{idx + 1}"
         egf_labels[egf_name] = label
+
+    # Add comparisons if provided
+    if egf_comparisons_list:
+        for egf_name, comparisons in egf_comparisons_list:
+            egf_comparisons[egf_name] = comparisons
+
+    # Add all LLM calls if provided
+    if egf_all_llm_calls_list:
+        for egf_name, calls in egf_all_llm_calls_list:
+            all_llm_calls[egf_name] = calls
 
     return GradesTableData(
         submissions=edf_submissions,
         egf_grades=egf_grades,
+        egf_comparisons=egf_comparisons,
+        all_llm_calls=all_llm_calls,
         egf_names=egf_names,
         egf_labels=egf_labels,
         max_grade=max_grade,

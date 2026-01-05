@@ -35,12 +35,20 @@ from .core import (
     all_same_source,
     load_edf_submissions_detail,
     load_egf_grades_detail,
+    load_egf_all_llm_calls,
     build_grades_table_data,
     ProcessedInput,
     MatchedEGF,
+    load_egf_comparisons,
+    build_comparison_tuples,
+    ComparisonAccuracyResult,
 )
 from .edf_cache import EDFCache
-from .bootstrap import get_default_stability_vector
+from .bootstrap import (
+    get_default_stability_vector,
+    bootstrap_comparison_accuracy,
+    bootstrap_comparison_accuracy_paired,
+)
 from .html_output import save_html_report
 from .core import FullAnalysisResult
 
@@ -83,6 +91,13 @@ def generate_summary_markdown(result: FullAnalysisResult) -> str:
                     p = result.comparison.win_matrix.get((i, j), 0.5)
                     row += f" {p:4.0%} "
             lines.append(row)
+
+    if result.comparison_accuracy:
+        lines.append("")
+        lines.append("Comparison Accuracy:")
+        for egf_name, acc in result.comparison_accuracy.items():
+            mean, lower, upper = acc.accuracy_ci
+            lines.append(f"  {egf_name}: {mean:.1%} [{lower:.1%}, {upper:.1%}] (n={acc.n_comparisons})")
 
     lines.append("=" * 60)
     return "\n".join(lines)
@@ -453,9 +468,13 @@ def run_analysis(
             edf_submissions = load_edf_submissions_detail(edf_path, noise_assumption)
 
             egf_grades_list = []
+            egf_all_llm_calls_list = []
             for egf_data in egf_data_list:
                 egf_grades = load_egf_grades_detail(egf_data.path)
                 egf_grades_list.append((egf_data.name, egf_grades))
+                # Load all LLM calls (including comparison calls)
+                all_calls = load_egf_all_llm_calls(egf_data.path)
+                egf_all_llm_calls_list.append((egf_data.name, all_calls))
 
             max_grade = egf_data_list[0].max_grade if egf_data_list else 40
             result.grades_table = build_grades_table_data(
@@ -464,10 +483,93 @@ def run_analysis(
                 result.labels,
                 max_grade,
                 noise_assumption,
+                egf_all_llm_calls_list=egf_all_llm_calls_list,
             )
             print(f"  Loaded {len(edf_submissions)} submissions")
         except Exception as e:
             print(f"  Warning: Failed to build grades table: {e}", file=sys.stderr)
+
+    # Load comparisons for each EGF and compute accuracy
+    if edf_path and result.grades_table:
+        print(f"\nLoading comparisons from EGF files...")
+        edf_submission_ids = set(edf_submissions.keys())
+        egf_comparisons: dict[str, dict[str, list]] = {}
+        comparison_accuracy: dict[str, ComparisonAccuracyResult] = {}
+        all_have_comparisons = True
+        comparison_tuples_by_idx: dict[int, list[tuple[int, int, str]]] = {}
+
+        for idx, egf_data in enumerate(egf_data_list):
+            try:
+                comparisons = load_egf_comparisons(egf_data.path, edf_submission_ids)
+                egf_comparisons[egf_data.name] = comparisons
+
+                # Build comparison tuples for accuracy calculation
+                # Flatten all comparisons for this EGF
+                all_comparisons = []
+                for sub_id, comp_list in comparisons.items():
+                    all_comparisons.extend(comp_list)
+
+                # Filter to only EDF-to-EDF comparisons (not external)
+                edf_comparisons = [c for c in all_comparisons if not c.is_external]
+                unique_comparisons = {c.comparison_id: c for c in edf_comparisons}
+                edf_comparisons = list(unique_comparisons.values())
+
+                if edf_comparisons:
+                    # Build tuples for bootstrap
+                    tuples = build_comparison_tuples(edf_comparisons, ground_truth)
+                    if tuples:
+                        comparison_tuples_by_idx[idx] = tuples
+                        # Compute accuracy for this EGF
+                        acc_ci = bootstrap_comparison_accuracy(
+                            tuples,
+                            teacher_noise,
+                            n_iterations=1000,
+                            seed=seed,
+                            min_grade=0,
+                            max_grade=max_grade,
+                        )
+                        n_external = len(all_comparisons) - len(edf_comparisons)
+                        comparison_accuracy[egf_data.name] = ComparisonAccuracyResult(
+                            raw_accuracy=acc_ci[0],
+                            n_comparisons=len(tuples),
+                            n_excluded_external=n_external,
+                            accuracy_ci=acc_ci,
+                        )
+                        print(f"  {egf_data.name}: {len(tuples)} comparisons, accuracy {acc_ci[0]:.1%} [{acc_ci[1]:.1%}, {acc_ci[2]:.1%}]")
+                    else:
+                        all_have_comparisons = False
+                        print(f"  {egf_data.name}: No valid comparison tuples")
+                else:
+                    all_have_comparisons = False
+                    print(f"  {egf_data.name}: No EDF-to-EDF comparisons")
+            except Exception as e:
+                all_have_comparisons = False
+                print(f"  Warning: Failed to load comparisons for {egf_data.name}: {e}", file=sys.stderr)
+
+        # Store comparisons in grades table
+        if egf_comparisons:
+            result.grades_table.egf_comparisons = egf_comparisons
+
+        # Store comparison accuracy results
+        if comparison_accuracy:
+            result.comparison_accuracy = comparison_accuracy
+
+        # Compute NxN paired comparison accuracy if all files have comparisons
+        if all_have_comparisons and len(comparison_tuples_by_idx) > 1:
+            print(f"\nComputing paired comparison accuracy matrix...")
+            try:
+                matrix, per_file = bootstrap_comparison_accuracy_paired(
+                    comparison_tuples_by_idx,
+                    teacher_noise,
+                    n_iterations=2000,
+                    seed=seed,
+                    min_grade=0,
+                    max_grade=max_grade,
+                )
+                result.comparison_accuracy_matrix = matrix
+                print(f"  Computed {len(matrix)} pairwise comparisons")
+            except Exception as e:
+                print(f"  Warning: Failed to compute comparison matrix: {e}", file=sys.stderr)
 
     # Generate summary and store it in the result for HTML embedding
     result.summary_markdown = generate_summary_markdown(result)

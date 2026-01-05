@@ -1,14 +1,21 @@
 """Self-contained HTML output generation for analysis results."""
 
 import base64
-import io
 import math
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import json
-from .core import FullAnalysisResult, AnalysisResult, ComparisonResult, QWKResult, GradesTableData
+from .core import (
+    FullAnalysisResult,
+    AnalysisResult,
+    ComparisonResult,
+    ComparisonAccuracyResult,
+    GradesTableData,
+)
+from .html_template import generate_html_shell
+from .html_components import generate_preact_app
 
 # Load icon as base64 at module level
 _ICON_BASE64: Optional[str] = None
@@ -52,255 +59,194 @@ def generate_html(result: FullAnalysisResult, noise_assumption: str = "expected"
     if result.summary_markdown:
         summary_comment = f"<!--\nSUMMARY\n\n{result.summary_markdown}\n-->\n"
 
-    qwk_chart_svg = generate_qwk_bar_chart(result)
-    comparison_svg = ""
-    if result.comparison:
-        comparison_svg = generate_comparison_heatmap(result)
+    # Generate static sections (SVG charts, individual analyses)
+    static_content = _generate_static_content(result, noise_assumption, timestamp)
 
-    individual_sections = []
-    for idx, res in enumerate(result.individual_results):
-        label = result.labels[idx] if idx < len(result.labels) else str(idx)
-        individual_sections.append(generate_individual_section(res, label))
+    # Build app data JSON for Preact
+    app_data = _build_app_data(result)
+    app_data_json = json.dumps(app_data, ensure_ascii=False)
 
-    legend_html = ""
-    if result.legend:
-        legend_items = [f"<li><strong>{k}</strong>: {v}</li>" for k, v in result.legend.items()]
-        legend_html = f'<div class="legend"><h3>Legend</h3><ul>{"".join(legend_items)}</ul></div>'
+    # Generate CSS
+    css = _generate_css()
 
-    comparison_section = ""
-    if result.comparison:
-        comparison_section = f'''
-        <section class="comparison">
-            <h2>Pairwise Comparison</h2>
-            <p>P(Row has higher QWK than Column) based on {result.comparison.n_iterations:,} bootstrap iterations using {result.comparison.n_common_essays} common essays.</p>
-            <div class="chart">{comparison_svg}</div>
-        </section>
-        '''
+    # Generate Preact app JS
+    app_js = generate_preact_app()
 
-    # Generate grades table section and modal if available
-    grades_table_section = ""
-    grades_table_css = ""
-    grades_table_modal = ""
-    grades_table_js = ""
-    if result.grades_table:
-        grades_table_css = generate_grades_table_css()
-        grades_table_section = generate_grades_table_section(result.grades_table)
-        grades_table_modal = generate_modal_html(result.grades_table)
-        grades_table_js = generate_grades_table_js(result.grades_table)
+    return generate_html_shell(
+        page_title=page_title,
+        favicon_link=favicon_link,
+        css=css,
+        summary_comment=summary_comment,
+        static_content=static_content,
+        app_data_json=app_data_json,
+        app_js=app_js,
+    )
 
-    html = f'''{summary_comment}<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{page_title}</title>
-    {favicon_link}
-    <style>
-        :root {{
-            --primary: #3b82f6;
-            --success: #22c55e;
-            --warning: #f59e0b;
-            --danger: #ef4444;
-            --gray-50: #f9fafb;
-            --gray-100: #f3f4f6;
-            --gray-200: #e5e7eb;
-            --gray-300: #d1d5db;
-            --gray-600: #4b5563;
-            --gray-700: #374151;
-            --gray-800: #1f2937;
-            --gray-900: #111827;
-        }}
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            color: var(--gray-800);
-            background: var(--gray-50);
-            padding: 2rem;
-        }}
-        .container {{
-            max-width: 1200px;
-            margin: 0 auto;
-        }}
-        header {{
-            background: white;
-            border-radius: 12px;
-            padding: 2rem;
-            margin-bottom: 2rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        header h1 {{
-            color: var(--gray-900);
-            font-size: 1.75rem;
-            margin-bottom: 0.5rem;
-        }}
-        header .meta {{
-            color: var(--gray-600);
-            font-size: 0.875rem;
-        }}
-        .legend {{
-            background: white;
-            border-radius: 12px;
-            padding: 1.5rem;
-            margin-bottom: 2rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        .legend h3 {{
-            font-size: 1rem;
-            margin-bottom: 0.75rem;
-            color: var(--gray-700);
-        }}
-        .legend ul {{
-            list-style: none;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 1rem;
-        }}
-        .legend li {{
-            font-size: 0.875rem;
-            color: var(--gray-600);
-        }}
-        section {{
-            background: white;
-            border-radius: 12px;
-            padding: 2rem;
-            margin-bottom: 2rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }}
-        section h2 {{
-            color: var(--gray-900);
-            font-size: 1.25rem;
-            margin-bottom: 1rem;
-            padding-bottom: 0.5rem;
-            border-bottom: 1px solid var(--gray-200);
-        }}
-        .chart {{
-            display: flex;
-            justify-content: center;
-            padding: 1rem 0;
-        }}
-        .chart svg {{
-            max-width: 100%;
-            height: auto;
-        }}
-        .stats-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin-bottom: 1.5rem;
-        }}
-        .stat-card {{
-            background: var(--gray-50);
-            border-radius: 8px;
-            padding: 1rem;
-        }}
-        .stat-card .label {{
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: var(--gray-600);
-            margin-bottom: 0.25rem;
-        }}
-        .stat-card .value {{
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: var(--gray-900);
-        }}
-        .stat-card .subvalue {{
-            font-size: 0.75rem;
-            color: var(--gray-600);
-        }}
-        .ci-table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 1rem;
-        }}
-        .ci-table th, .ci-table td {{
-            padding: 0.75rem;
-            text-align: left;
-            border-bottom: 1px solid var(--gray-200);
-        }}
-        .ci-table th {{
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: var(--gray-600);
-            font-weight: 500;
-        }}
-        .ci-table td {{
-            font-size: 0.875rem;
-        }}
-        .ci-bar {{
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }}
-        .ci-bar .bar {{
-            height: 8px;
-            background: var(--primary);
-            border-radius: 4px;
-            opacity: 0.3;
-        }}
-        .ci-bar .point {{
-            width: 8px;
-            height: 8px;
-            background: var(--primary);
-            border-radius: 50%;
-        }}
-        footer {{
-            text-align: center;
-            padding: 2rem;
-            color: var(--gray-600);
-            font-size: 0.875rem;
-        }}
-        @media (max-width: 768px) {{
-            body {{
-                padding: 1rem;
-            }}
-            header, section {{
-                padding: 1.5rem;
-            }}
-        }}
-        .text-gray {{
-            color: var(--gray-500);
-        }}
-        {grades_table_css}
-    </style>
-</head>
-<body>
-    <div class="container">
+
+def _generate_static_content(result: FullAnalysisResult, noise_assumption: str, timestamp: str) -> str:
+    """Generate static HTML content (header, SVG charts, individual sections)."""
+    parts = []
+
+    # Header
+    parts.append(f'''
         <header>
             <h1>EGF Analysis Report</h1>
             <div class="meta">Generated: {timestamp} | Noise assumption: {noise_assumption}</div>
         </header>
+    ''')
 
-        {legend_html}
+    # Legend
+    if result.legend:
+        legend_items = [f"<li><strong>{k}</strong>: {v}</li>" for k, v in result.legend.items()]
+        parts.append(f'<div class="legend"><h3>Legend</h3><ul>{"".join(legend_items)}</ul></div>')
 
+    # QWK Overview
+    qwk_chart_svg = generate_qwk_bar_chart(result)
+    parts.append(f'''
         <section class="overview">
             <h2>QWK Overview</h2>
             <div class="chart">{qwk_chart_svg}</div>
         </section>
+    ''')
 
-        {comparison_section}
+    # Pairwise QWK Comparison
+    if result.comparison:
+        comparison_svg = generate_comparison_heatmap(result)
+        parts.append(f'''
+        <section class="comparison">
+            <h2>Pairwise QWK Comparison</h2>
+            <p>P(Row has higher QWK than Column) based on {result.comparison.n_iterations:,} bootstrap iterations using {result.comparison.n_common_essays} common essays.</p>
+            <div class="chart">{comparison_svg}</div>
+        </section>
+        ''')
 
-        {grades_table_section}
+    # Comparison Accuracy Section (NEW)
+    if result.comparison_accuracy:
+        accuracy_section = _generate_comparison_accuracy_section(result)
+        parts.append(accuracy_section)
 
-        {"".join(individual_sections)}
+    # Individual EGF sections
+    for idx, res in enumerate(result.individual_results):
+        label = result.labels[idx] if idx < len(result.labels) else str(idx)
+        parts.append(generate_individual_section(res, label))
 
-        <footer>
-            Generated by c - EGF Analysis CLI
-        </footer>
-    </div>
-    {grades_table_modal}
-    {grades_table_js}
-</body>
-</html>'''
+    return "\n".join(parts)
 
-    return html
+
+def _generate_comparison_accuracy_section(result: FullAnalysisResult) -> str:
+    """Generate the comparison accuracy overview section."""
+    if not result.comparison_accuracy:
+        return ""
+
+    # Generate bar chart
+    chart_svg = generate_comparison_accuracy_chart(result)
+
+    # Generate NxN matrix if available
+    matrix_section = ""
+    if result.comparison_accuracy_matrix and len(result.comparison_accuracy) > 1:
+        matrix_svg = generate_comparison_accuracy_heatmap(result)
+        matrix_section = f'''
+            <h3>Pairwise Accuracy Comparison</h3>
+            <p>P(Row has higher comparison accuracy than Column)</p>
+            <div class="chart">{matrix_svg}</div>
+        '''
+
+    # Build stats summary
+    stats_items = []
+    for egf_name, acc_result in result.comparison_accuracy.items():
+        label = result.legend.get(egf_name, egf_name) if result.legend else egf_name
+        # Find the label from legend by matching the name
+        for lbl, name in (result.legend or {}).items():
+            if name == egf_name:
+                label = lbl
+                break
+        if not math.isnan(acc_result.raw_accuracy):
+            stats_items.append(f"<li><strong>{label}</strong>: {acc_result.raw_accuracy:.1%} ({acc_result.n_comparisons} comparisons)</li>")
+
+    return f'''
+    <section class="comparison-accuracy">
+        <h2>Comparison Accuracy</h2>
+        <p>Accuracy of pairwise comparisons against ground truth grade ordering.
+           Comparisons where noised GT grades are equal are excluded from each bootstrap iteration.</p>
+        <div class="chart">{chart_svg}</div>
+        {matrix_section}
+        <ul class="accuracy-stats">{" ".join(stats_items)}</ul>
+    </section>
+    '''
+
+
+def _build_app_data(result: FullAnalysisResult) -> dict:
+    """Build the JSON data structure for the Preact app."""
+    if not result.grades_table:
+        return {}
+
+    grades_table = result.grades_table
+
+    # Serialize submissions
+    submissions_data = {}
+    for sid, sub in grades_table.submissions.items():
+        submissions_data[sid] = {
+            'submission_id': sub.submission_id,
+            'student_name': sub.student_name,
+            'student_id': sub.student_id,
+            'essay_markdown': sub.essay_markdown,
+            'ground_truth_grade': sub.ground_truth_grade,
+            'gt_distribution': sub.gt_distribution,
+            'pdf_base64': sub.pdf_base64,
+            'gt_justification': sub.gt_justification,
+        }
+
+    # Serialize EGF grades
+    egf_grades_data = {}
+    for egf_name, grades in grades_table.egf_grades.items():
+        egf_grades_data[egf_name] = {}
+        for sid, grade in grades.items():
+            llm_calls_data = [
+                {
+                    'call_id': call.call_id,
+                    'pass_number': call.pass_number,
+                    'raw_json': call.raw_json,
+                }
+                for call in grade.llm_calls
+            ]
+            egf_grades_data[egf_name][sid] = {
+                'submission_id': grade.submission_id,
+                'grade': grade.grade,
+                'grade_distribution': grade.grade_distribution,
+                'justification': grade.justification,
+                'llm_calls': llm_calls_data,
+            }
+
+    # Serialize comparisons
+    egf_comparisons_data = {}
+    for egf_name, comps_by_sub in grades_table.egf_comparisons.items():
+        egf_comparisons_data[egf_name] = {}
+        for sub_id, comps in comps_by_sub.items():
+            egf_comparisons_data[egf_name][sub_id] = [
+                {
+                    'comparison_id': c.comparison_id,
+                    'submission_a': c.submission_a,
+                    'submission_b': c.submission_b,
+                    'winner': c.winner,
+                    'call_ids': c.call_ids,
+                    'compared_at': c.compared_at,
+                    'confidence': c.confidence,
+                    'justification': c.justification,
+                    'is_external': c.is_external,
+                }
+                for c in comps
+            ]
+
+    return {
+        'submissions': submissions_data,
+        'egfGrades': egf_grades_data,
+        'egfComparisons': egf_comparisons_data,
+        'allLLMCalls': grades_table.all_llm_calls,  # All LLM calls by EGF name
+        'egfNames': grades_table.egf_names,
+        'egfLabels': grades_table.egf_labels,
+        'maxGrade': grades_table.max_grade,
+        'noiseAssumption': grades_table.noise_assumption,
+    }
 
 
 def generate_individual_section(result: AnalysisResult, label: str) -> str:
@@ -311,11 +257,6 @@ def generate_individual_section(result: AnalysisResult, label: str) -> str:
     grading_mean, grading_lower, grading_upper = qwk.grading_noise_ci
     sampling_mean, sampling_lower, sampling_upper = qwk.sampling_ci
     combined_mean, combined_lower, combined_upper = qwk.combined_ci
-
-    def format_ci(mean: float, lower: float, upper: float) -> str:
-        if math.isnan(mean):
-            return "N/A"
-        return f"{mean:.3f} [{lower:.3f}, {upper:.3f}]"
 
     return f'''
     <section class="individual">
@@ -507,17 +448,14 @@ def generate_comparison_heatmap(result: FullAnalysisResult) -> str:
                 text = "-"
             else:
                 prob = comp.win_matrix.get((i, j), 0.5)
-                # Three-point color scale: red (0) → yellow (0.5) → green (1)
-                # Red: rgb(239, 68, 68), Yellow: rgb(234, 179, 8), Green: rgb(34, 197, 94)
+                # Three-point color scale: red (0) -> yellow (0.5) -> green (1)
                 if prob >= 0.5:
-                    # Interpolate from yellow to green
-                    t = (prob - 0.5) * 2  # 0 to 1 as prob goes from 0.5 to 1
+                    t = (prob - 0.5) * 2
                     r = int(234 + (34 - 234) * t)
                     g = int(179 + (197 - 179) * t)
                     b = int(8 + (94 - 8) * t)
                 else:
-                    # Interpolate from red to yellow
-                    t = prob * 2  # 0 to 1 as prob goes from 0 to 0.5
+                    t = prob * 2
                     r = int(239 + (234 - 239) * t)
                     g = int(68 + (179 - 68) * t)
                     b = int(68 + (8 - 68) * t)
@@ -556,9 +494,334 @@ def generate_comparison_heatmap(result: FullAnalysisResult) -> str:
     return svg
 
 
-def generate_grades_table_css() -> str:
-    """Generate CSS for the grades table and modal."""
+def generate_comparison_accuracy_chart(result: FullAnalysisResult) -> str:
+    """Generate SVG bar chart showing comparison accuracy with CI."""
+    if not result.comparison_accuracy:
+        return ""
+
+    n_files = len(result.comparison_accuracy)
+    if n_files == 0:
+        return ""
+
+    bar_width = 40
+    gap = 20
+    chart_width = max(300, n_files * (bar_width + gap) + 100)
+    chart_height = 200
+    margin_left = 50
+    margin_bottom = 40
+    margin_top = 20
+
+    plot_height = chart_height - margin_top - margin_bottom
+
+    bars_svg = []
+    idx = 0
+
+    for egf_name, acc_result in result.comparison_accuracy.items():
+        if math.isnan(acc_result.raw_accuracy):
+            idx += 1
+            continue
+
+        # Find label
+        label = egf_name
+        for lbl, name in (result.legend or {}).items():
+            if name == egf_name:
+                label = lbl
+                break
+
+        mean, lower, upper = acc_result.accuracy_ci
+        bar_x = margin_left + idx * (bar_width + gap)
+
+        # Draw CI bar
+        mean_y = margin_top + plot_height * (1 - mean)
+        lower_y = margin_top + plot_height * (1 - max(0, lower))
+        upper_y = margin_top + plot_height * (1 - min(1, upper))
+
+        bars_svg.append(f'''
+            <line x1="{bar_x + bar_width/2}" y1="{lower_y}" x2="{bar_x + bar_width/2}" y2="{upper_y}"
+                  stroke="#8b5cf6" stroke-width="4" opacity="0.5"/>
+            <line x1="{bar_x + 5}" y1="{lower_y}" x2="{bar_x + bar_width - 5}" y2="{lower_y}"
+                  stroke="#8b5cf6" stroke-width="2"/>
+            <line x1="{bar_x + 5}" y1="{upper_y}" x2="{bar_x + bar_width - 5}" y2="{upper_y}"
+                  stroke="#8b5cf6" stroke-width="2"/>
+            <circle cx="{bar_x + bar_width/2}" cy="{mean_y}" r="5" fill="#8b5cf6"/>
+            <text x="{bar_x + bar_width/2}" y="{chart_height - 10}"
+                  text-anchor="middle" font-size="12" font-weight="bold">{label}</text>
+            <text x="{bar_x + bar_width/2}" y="{mean_y - 10}"
+                  text-anchor="middle" font-size="10">{mean:.0%}</text>
+        ''')
+        idx += 1
+
+    # Y-axis
+    y_axis = []
+    for i in range(6):
+        val = i * 0.2
+        y = margin_top + plot_height * (1 - val)
+        y_axis.append(f'''
+            <line x1="{margin_left - 5}" y1="{y}" x2="{chart_width - 20}" y2="{y}"
+                  stroke="#e5e7eb" stroke-width="1"/>
+            <text x="{margin_left - 10}" y="{y + 4}" text-anchor="end" font-size="10">{val:.0%}</text>
+        ''')
+
+    svg = f'''
+    <svg width="{chart_width}" height="{chart_height}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        {"".join(y_axis)}
+        {"".join(bars_svg)}
+        <text x="{margin_left - 35}" y="{chart_height / 2}" text-anchor="middle"
+              font-size="12" transform="rotate(-90, {margin_left - 35}, {chart_height / 2})">Accuracy</text>
+    </svg>
+    '''
+
+    return svg
+
+
+def generate_comparison_accuracy_heatmap(result: FullAnalysisResult) -> str:
+    """Generate SVG heatmap for pairwise comparison accuracy."""
+    if not result.comparison_accuracy_matrix:
+        return ""
+
+    n = len(result.comparison_accuracy)
+    cell_size = 60
+    margin = 50
+    chart_size = n * cell_size + margin * 2
+
+    cells = []
+    labels = []
+
+    egf_names = list(result.comparison_accuracy.keys())
+
+    for i in range(n):
+        for j in range(n):
+            x = margin + j * cell_size
+            y = margin + i * cell_size
+
+            if i == j:
+                color = "#f3f4f6"
+                text = "-"
+            else:
+                prob = result.comparison_accuracy_matrix.get((i, j), 0.5)
+                if math.isnan(prob):
+                    color = "#f3f4f6"
+                    text = "-"
+                else:
+                    # Three-point color scale
+                    if prob >= 0.5:
+                        t = (prob - 0.5) * 2
+                        r = int(234 + (34 - 234) * t)
+                        g = int(179 + (197 - 179) * t)
+                        b = int(8 + (94 - 8) * t)
+                    else:
+                        t = prob * 2
+                        r = int(239 + (234 - 239) * t)
+                        g = int(68 + (179 - 68) * t)
+                        b = int(68 + (8 - 68) * t)
+                    color = f"rgb({r}, {g}, {b})"
+                    text = f"{prob:.0%}"
+
+            cells.append(f'''
+                <rect x="{x}" y="{y}" width="{cell_size}" height="{cell_size}"
+                      fill="{color}" stroke="#e5e7eb"/>
+                <text x="{x + cell_size/2}" y="{y + cell_size/2 + 5}"
+                      text-anchor="middle" font-size="12" font-weight="bold">{text}</text>
+            ''')
+
+    # Labels
+    for i, egf_name in enumerate(egf_names):
+        label = egf_name
+        for lbl, name in (result.legend or {}).items():
+            if name == egf_name:
+                label = lbl
+                break
+        labels.append(f'''
+            <text x="{margin - 10}" y="{margin + i * cell_size + cell_size/2 + 5}"
+                  text-anchor="end" font-size="12" font-weight="bold">{label}</text>
+            <text x="{margin + i * cell_size + cell_size/2}" y="{margin - 10}"
+                  text-anchor="middle" font-size="12" font-weight="bold">{label}</text>
+        ''')
+
+    svg = f'''
+    <svg width="{chart_size}" height="{chart_size}" xmlns="http://www.w3.org/2000/svg">
+        <rect width="100%" height="100%" fill="white"/>
+        {"".join(cells)}
+        {"".join(labels)}
+    </svg>
+    '''
+
+    return svg
+
+
+def _generate_css() -> str:
+    """Generate all CSS styles for the report."""
     return '''
+        :root {
+            --primary: #3b82f6;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-300: #d1d5db;
+            --gray-500: #6b7280;
+            --gray-600: #4b5563;
+            --gray-700: #374151;
+            --gray-800: #1f2937;
+            --gray-900: #111827;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: var(--gray-800);
+            background: var(--gray-50);
+            padding: 2rem;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        header {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        header h1 {
+            color: var(--gray-900);
+            font-size: 1.75rem;
+            margin-bottom: 0.5rem;
+        }
+        header .meta {
+            color: var(--gray-600);
+            font-size: 0.875rem;
+        }
+        .legend {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .legend h3 {
+            font-size: 1rem;
+            margin-bottom: 0.75rem;
+            color: var(--gray-700);
+        }
+        .legend ul {
+            list-style: none;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        .legend li {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+        }
+        section {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        section h2 {
+            color: var(--gray-900);
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid var(--gray-200);
+        }
+        section h3 {
+            color: var(--gray-800);
+            font-size: 1.1rem;
+            margin: 1.5rem 0 0.75rem 0;
+        }
+        .chart {
+            display: flex;
+            justify-content: center;
+            padding: 1rem 0;
+        }
+        .chart svg {
+            max-width: 100%;
+            height: auto;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        .stat-card {
+            background: var(--gray-50);
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        .stat-card .label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--gray-600);
+            margin-bottom: 0.25rem;
+        }
+        .stat-card .value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--gray-900);
+        }
+        .ci-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        .ci-table th, .ci-table td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--gray-200);
+        }
+        .ci-table th {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--gray-600);
+            font-weight: 500;
+        }
+        .ci-table td {
+            font-size: 0.875rem;
+        }
+        .accuracy-stats {
+            list-style: none;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1.5rem;
+            margin-top: 1rem;
+        }
+        .accuracy-stats li {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+        }
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--gray-600);
+            font-size: 0.875rem;
+        }
+        @media (max-width: 768px) {
+            body {
+                padding: 1rem;
+            }
+            header, section {
+                padding: 1.5rem;
+            }
+        }
+        .text-gray {
+            color: var(--gray-500);
+        }
+
         /* Grades Table */
         .grades-section {
             background: white;
@@ -587,10 +850,6 @@ def generate_grades_table_css() -> str:
             position: sticky;
             top: 0;
             background: white;
-        }
-        .grades-table tbody {
-            max-height: 500px;
-            overflow-y: auto;
         }
         .grade-row {
             cursor: pointer;
@@ -637,7 +896,6 @@ def generate_grades_table_css() -> str:
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            position: relative;
         }
         .modal-header {
             padding: 1.5rem;
@@ -693,12 +951,6 @@ def generate_grades_table_css() -> str:
             overflow-y: auto;
             flex: 1;
         }
-        .tab-content {
-            display: none;
-        }
-        .tab-content.active {
-            display: block;
-        }
 
         /* Markdown Content */
         .markdown-content {
@@ -752,7 +1004,7 @@ def generate_grades_table_css() -> str:
             color: var(--gray-600);
         }
 
-        /* Grade Display in Modal */
+        /* Grade Display */
         .grade-display {
             display: flex;
             align-items: baseline;
@@ -796,7 +1048,7 @@ def generate_grades_table_css() -> str:
             margin-bottom: 0.75rem;
         }
 
-        /* Scrollable table container */
+        /* Table container */
         .table-container {
             max-height: 500px;
             overflow-y: auto;
@@ -819,7 +1071,7 @@ def generate_grades_table_css() -> str:
             margin-bottom: 0.75rem;
         }
 
-        /* Subtabs for LLM calls */
+        /* Subtabs */
         .subtabs {
             display: flex;
             gap: 0.25rem;
@@ -846,12 +1098,29 @@ def generate_grades_table_css() -> str:
             border-color: var(--primary);
         }
 
-        /* Call ID display */
-        .call-id-display {
+        /* Inspection Screen */
+        .inspection-screen {
+            margin-top: 1rem;
+        }
+        .inspection-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        .inspection-header h4 {
+            font-size: 1rem;
+            color: var(--gray-800);
+        }
+        .inspection-meta {
+            display: flex;
+            gap: 1rem;
             font-size: 0.75rem;
             color: var(--gray-500);
-            margin-bottom: 0.5rem;
+        }
+        .call-id {
             font-family: ui-monospace, monospace;
+            color: var(--gray-500);
         }
 
         /* JSON display */
@@ -883,18 +1152,6 @@ def generate_grades_table_css() -> str:
         }
         .json-display .json-null {
             color: #9ca3af;
-        }
-
-        .subtab-content {
-            display: none;
-        }
-        .subtab-content.active {
-            display: block;
-        }
-        .no-calls-message {
-            color: var(--gray-500);
-            font-style: italic;
-            font-size: 0.875rem;
         }
 
         /* Collapsible sections */
@@ -937,69 +1194,26 @@ def generate_grades_table_css() -> str:
             display: block;
         }
 
-        /* LLM Input section */
-        .llm-input-section {
-            margin-top: 1.5rem;
+        /* LLM Input/Output sections */
+        .llm-output-section, .llm-input-section {
+            margin-bottom: 1rem;
         }
-        .llm-input-section h5,
-        .llm-json-section h5 {
+        .llm-output-section h5, .llm-input-section h5 {
             font-size: 0.8rem;
             color: var(--gray-600);
             margin-bottom: 0.5rem;
             font-weight: 500;
         }
-
-        /* LLM JSON section */
-        .llm-json-section {
-            margin-top: 1.5rem;
-        }
-
-        /* PDF Viewer */
-        .pdf-container {
-            height: 70vh;
-            min-height: 500px;
-            display: flex;
-            flex-direction: column;
-        }
-        .pdf-viewer {
-            width: 100%;
-            height: 100%;
-            border: 1px solid var(--gray-200);
+        .llm-output-content {
+            background: var(--gray-50);
             border-radius: 8px;
-            background: var(--gray-100);
-        }
-        .pdf-fallback {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            gap: 1rem;
-            color: var(--gray-600);
-        }
-        .pdf-download-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.75rem 1.5rem;
-            background: var(--primary);
-            color: white;
-            border-radius: 8px;
-            text-decoration: none;
-            font-weight: 500;
-            transition: background 0.15s;
-        }
-        .pdf-download-btn:hover {
-            background: #2563eb;
-        }
-        .pdf-not-available {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 200px;
+            padding: 1rem;
+            min-height: 100px;
+            max-height: 500px;
+            overflow-y: auto;
         }
 
-        /* Markdown Source View (VSCode-style) */
+        /* Markdown Source View */
         .markdown-source {
             background: var(--gray-900);
             color: #d4d4d4;
@@ -1022,10 +1236,6 @@ def generate_grades_table_css() -> str:
             color: #ce9178;
             font-weight: bold;
         }
-        .markdown-source .md-italic {
-            color: #ce9178;
-            font-style: italic;
-        }
         .markdown-source .md-code {
             color: #d7ba7d;
             background: rgba(255,255,255,0.05);
@@ -1043,729 +1253,292 @@ def generate_grades_table_css() -> str:
         .markdown-source .md-blockquote {
             color: #608b4e;
         }
-        .markdown-source .md-hr {
-            color: #6a9955;
+
+        /* PDF Viewer */
+        .pdf-container {
+            height: 70vh;
+            min-height: 500px;
+        }
+        .pdf-viewer {
+            width: 100%;
+            height: 100%;
+            border: 1px solid var(--gray-200);
+            border-radius: 8px;
+            background: var(--gray-100);
+        }
+        .pdf-not-available {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 200px;
         }
 
-        /* LLM Output section */
-        .llm-output-section {
-            margin-bottom: 1rem;
-        }
-        .llm-output-section h5 {
-            font-size: 0.8rem;
-            color: var(--gray-600);
+        /* Comparison Components */
+        .comparison-card {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            border: 1px solid var(--gray-200);
+            border-radius: 8px;
             margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+        .comparison-card:hover {
+            background: var(--gray-50);
+            border-color: var(--gray-300);
+        }
+        .comparison-summary {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .comparison-summary .participant {
             font-weight: 500;
         }
-        .llm-output-content {
-            background: var(--gray-50);
+        .comparison-summary .participant.winner {
+            color: var(--success);
+        }
+        .comparison-summary .vs {
+            color: var(--gray-400);
+            font-size: 0.75rem;
+        }
+        .comparison-meta {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .comparison-meta .confidence {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+        }
+        .external-badge {
+            font-size: 0.65rem;
+            padding: 0.15rem 0.4rem;
+            background: var(--gray-200);
+            color: var(--gray-600);
+            border-radius: 4px;
+        }
+        .winner-badge {
+            font-size: 0.65rem;
+            padding: 0.15rem 0.4rem;
+            background: var(--success);
+            color: white;
+            border-radius: 4px;
+        }
+        .tie-badge {
+            font-size: 0.875rem;
+            padding: 0.25rem 0.75rem;
+            background: var(--gray-200);
+            color: var(--gray-700);
+            border-radius: 4px;
+        }
+        .comparison-pair {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 2rem;
+            margin-bottom: 1.5rem;
+        }
+        .submission-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 1rem 2rem;
+            border: 2px solid var(--gray-200);
             border-radius: 8px;
-            padding: 1rem;
-            min-height: 200px;
-            max-height: 500px;
-            overflow-y: auto;
+            min-width: 150px;
         }
-    '''
-
-
-def generate_grades_table_js(grades_table: GradesTableData) -> str:
-    """Generate JavaScript for the grades table interactivity."""
-    # Convert dataclasses to JSON-serializable dicts
-    submissions_data = {}
-    for sid, sub in grades_table.submissions.items():
-        submissions_data[sid] = {
-            'submission_id': sub.submission_id,
-            'student_name': sub.student_name,
-            'student_id': sub.student_id,
-            'essay_markdown': sub.essay_markdown,
-            'ground_truth_grade': sub.ground_truth_grade,
-            'gt_distribution': sub.gt_distribution,
-            'gt_justification': sub.gt_justification,
-            'pdf_base64': sub.pdf_base64,
+        .submission-card.winner {
+            border-color: var(--success);
+            background: rgba(34, 197, 94, 0.05);
+        }
+        .submission-card.external {
+            border-style: dashed;
+        }
+        .submission-card .submission-label {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+            margin-bottom: 0.25rem;
+        }
+        .submission-card .submission-name {
+            font-weight: 600;
+            color: var(--gray-800);
+        }
+        .vs-large {
+            font-size: 1.25rem;
+            color: var(--gray-400);
+            font-weight: bold;
+        }
+        .result-display {
+            text-align: center;
+            margin-bottom: 1.5rem;
+        }
+        .winner-announcement {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--success);
+        }
+        .back-btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.5rem 1rem;
+            margin-bottom: 1rem;
+            border: 1px solid var(--gray-300);
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            color: var(--gray-600);
+            transition: all 0.15s;
+        }
+        .back-btn:hover {
+            background: var(--gray-50);
+            border-color: var(--gray-400);
+        }
+        .comparisons-list {
+            margin-top: 1rem;
+        }
+        .comparisons-count {
+            font-size: 0.875rem;
+            color: var(--gray-500);
+            margin-bottom: 1rem;
+        }
+        .no-comparisons {
+            font-style: italic;
         }
 
-    egf_grades_data = {}
-    for egf_name, grades in grades_table.egf_grades.items():
-        egf_grades_data[egf_name] = {}
-        for sid, grade in grades.items():
-            llm_calls_data = [
-                {
-                    'call_id': call.call_id,
-                    'pass_number': call.pass_number,
-                    'raw_json': call.raw_json,
-                }
-                for call in grade.llm_calls
-            ]
-            egf_grades_data[egf_name][sid] = {
-                'submission_id': grade.submission_id,
-                'grade': grade.grade,
-                'grade_distribution': grade.grade_distribution,
-                'justification': grade.justification,
-                'llm_calls': llm_calls_data,
-            }
-
-    data = {
-        'submissions': submissions_data,
-        'egfGrades': egf_grades_data,
-        'egfNames': grades_table.egf_names,
-        'egfLabels': grades_table.egf_labels,
-        'maxGrade': grades_table.max_grade,
-        'noiseAssumption': grades_table.noise_assumption,
-    }
-
-    return f'''
-<script id="gradesData" type="application/json">
-{json.dumps(data)}
-</script>
-<script>
-(function() {{
-    const gradesData = JSON.parse(document.getElementById('gradesData').textContent);
-
-    // Simple Markdown Parser (for essay/justification content)
-    function parseMarkdown(md) {{
-        if (!md) return '<em class="text-gray">No content available</em>';
-
-        let html = md
-            // Escape HTML first
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            // Code blocks (before other processing)
-            .replace(/```([\\s\\S]*?)```/g, '<pre><code>$1</code></pre>')
-            // Inline code
-            .replace(/`([^`]+)`/g, '<code>$1</code>')
-            // Headers
-            .replace(/^### (.*)$/gm, '<h3>$1</h3>')
-            .replace(/^## (.*)$/gm, '<h2>$1</h2>')
-            .replace(/^# (.*)$/gm, '<h1>$1</h1>')
-            // Bold and Italic
-            .replace(/\\*\\*\\*(.+?)\\*\\*\\*/g, '<strong><em>$1</em></strong>')
-            .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')
-            .replace(/\\*(.+?)\\*/g, '<em>$1</em>')
-            .replace(/___(.+?)___/g, '<strong><em>$1</em></strong>')
-            .replace(/__(.+?)__/g, '<strong>$1</strong>')
-            .replace(/_(.+?)_/g, '<em>$1</em>')
-            // Blockquotes
-            .replace(/^> (.*)$/gm, '<blockquote>$1</blockquote>')
-            // Unordered lists
-            .replace(/^[\\*\\-] (.*)$/gm, '<li>$1</li>')
-            // Ordered lists
-            .replace(/^\\d+\\. (.*)$/gm, '<li>$1</li>')
-            // Line breaks
-            .replace(/\\n\\n/g, '</p><p>')
-            .replace(/\\n/g, '<br>');
-
-        // Wrap in paragraphs if not already wrapped
-        if (!html.startsWith('<')) {{
-            html = '<p>' + html + '</p>';
-        }}
-
-        // Clean up consecutive blockquotes
-        html = html.replace(/<\\/blockquote>\\s*<blockquote>/g, '<br>');
-
-        // Wrap lists
-        html = html.replace(/(<li>.*<\\/li>)/gs, '<ul>$1</ul>');
-        html = html.replace(/<\\/ul>\\s*<ul>/g, '');
-
-        return html;
-    }}
-
-    // VSCode-style Markdown Syntax Highlighter (shows raw text with colors)
-    function highlightMarkdownSource(md) {{
-        if (!md) return '<em class="text-gray">No content available</em>';
-
-        let html = md
-            // Escape HTML first
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-
-        // Code blocks (fenced) - must be done first
-        html = html.replace(/(```[\\s\\S]*?```)/g, '<span class="md-code-block">$1</span>');
-
-        // Headers (only if not inside code block)
-        html = html.replace(/^(#{1,6} .*)$/gm, '<span class="md-header">$1</span>');
-
-        // Horizontal rules
-        html = html.replace(/^([-*_]{{3,}})$/gm, '<span class="md-hr">$1</span>');
-
-        // Bold with ** or __
-        html = html.replace(/(\\*\\*[^*]+\\*\\*)/g, '<span class="md-bold">$1</span>');
-        html = html.replace(/(__[^_]+__)/g, '<span class="md-bold">$1</span>');
-
-        // Italic with * or _ (avoiding already matched bold)
-        html = html.replace(/(?<!\\*)\\*([^*]+)\\*(?!\\*)/g, '<span class="md-italic">*$1*</span>');
-        html = html.replace(/(?<!_)_([^_]+)_(?!_)/g, '<span class="md-italic">_$1_</span>');
-
-        // Inline code (backticks, not inside code blocks)
-        html = html.replace(/(`[^`]+`)/g, '<span class="md-code">$1</span>');
-
-        // Links [text](url)
-        html = html.replace(/(\\[[^\\]]+\\]\\([^)]+\\))/g, '<span class="md-link">$1</span>');
-
-        // List items
-        html = html.replace(/^([\\*\\-+] )/gm, '<span class="md-list">$1</span>');
-        html = html.replace(/^(\\d+\\. )/gm, '<span class="md-list">$1</span>');
-
-        // Blockquotes
-        html = html.replace(/^(&gt; .*)/gm, '<span class="md-blockquote">$1</span>');
-
-        return '<div class="markdown-source">' + html + '</div>';
-    }}
-
-    // Extract LLM output from raw_json
-    function extractLLMOutput(rawJson) {{
-        if (!rawJson) return null;
-
-        // Try common structures for LLM output
-        // 1. Check for 'output' field
-        if (rawJson.output) {{
-            if (typeof rawJson.output === 'string') return rawJson.output;
-            if (rawJson.output.content) return extractContentText(rawJson.output.content);
-            if (rawJson.output.text) return rawJson.output.text;
-            if (rawJson.output.message) return extractMessageContent(rawJson.output.message);
-        }}
-
-        // 2. Check for 'response' field
-        if (rawJson.response) {{
-            if (typeof rawJson.response === 'string') return rawJson.response;
-            if (rawJson.response.content) return extractContentText(rawJson.response.content);
-            if (rawJson.response.text) return rawJson.response.text;
-            if (rawJson.response.message) return extractMessageContent(rawJson.response.message);
-        }}
-
-        // 3. Check for 'completion' field
-        if (rawJson.completion) {{
-            if (typeof rawJson.completion === 'string') return rawJson.completion;
-        }}
-
-        // 4. Check for 'choices' (OpenAI style)
-        if (rawJson.choices && Array.isArray(rawJson.choices) && rawJson.choices.length > 0) {{
-            const choice = rawJson.choices[0];
-            if (choice.message) return extractMessageContent(choice.message);
-            if (choice.text) return choice.text;
-        }}
-
-        // 5. Check for 'content' directly (Anthropic style)
-        if (rawJson.content) {{
-            return extractContentText(rawJson.content);
-        }}
-
-        // 6. Check for 'result' field
-        if (rawJson.result) {{
-            if (typeof rawJson.result === 'string') return rawJson.result;
-            if (rawJson.result.content) return extractContentText(rawJson.result.content);
-        }}
-
-        return null;
-    }}
-
-    // Helper to extract text from content array
-    function extractContentText(content) {{
-        if (typeof content === 'string') return content;
-        if (Array.isArray(content)) {{
-            return content
-                .filter(part => part.type === 'text' || part.text)
-                .map(part => part.text || part)
-                .join('\\n');
-        }}
-        return null;
-    }}
-
-    // Helper to extract content from message object
-    function extractMessageContent(message) {{
-        if (typeof message === 'string') return message;
-        if (message.content) return extractContentText(message.content);
-        if (message.text) return message.text;
-        return null;
-    }}
-
-    // Format JSON with syntax highlighting
-    function formatJsonWithHighlighting(obj) {{
-        const jsonStr = JSON.stringify(obj, null, 2);
-        return jsonStr
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"([^"]+)":/g, '<span class="json-key">"$1"</span>:')
-            .replace(/: "([^"]*)"/g, ': <span class="json-string">"$1"</span>')
-            .replace(/: (\\d+\\.?\\d*)/g, ': <span class="json-number">$1</span>')
-            .replace(/: (true|false)/g, ': <span class="json-boolean">$1</span>')
-            .replace(/: (null)/g, ': <span class="json-null">$1</span>');
-    }}
-
-    // Toggle collapsible section
-    function toggleCollapsible(el) {{
-        el.classList.toggle('open');
-    }}
-    window.toggleCollapsible = toggleCollapsible;
-
-    // Extract LLM input from raw_json
-    function extractLLMInput(rawJson) {{
-        if (!rawJson) return null;
-
-        // Try common structures for LLM input
-        // 1. Check for 'input' field
-        if (rawJson.input) {{
-            if (typeof rawJson.input === 'string') return rawJson.input;
-            if (rawJson.input.messages) return formatMessages(rawJson.input.messages);
-            if (rawJson.input.prompt) return rawJson.input.prompt;
-        }}
-
-        // 2. Check for 'messages' directly
-        if (rawJson.messages) {{
-            return formatMessages(rawJson.messages);
-        }}
-
-        // 3. Check for 'prompt' directly
-        if (rawJson.prompt) {{
-            return rawJson.prompt;
-        }}
-
-        // 4. Check for request body
-        if (rawJson.request && rawJson.request.messages) {{
-            return formatMessages(rawJson.request.messages);
-        }}
-
-        return null;
-    }}
-
-    // Format messages array into readable markdown
-    function formatMessages(messages) {{
-        if (!Array.isArray(messages)) return null;
-
-        return messages.map(msg => {{
-            const role = msg.role || 'unknown';
-            let content = '';
-
-            if (typeof msg.content === 'string') {{
-                content = msg.content;
-            }} else if (Array.isArray(msg.content)) {{
-                // Handle content array (e.g., with text and images)
-                content = msg.content
-                    .filter(part => part.type === 'text')
-                    .map(part => part.text)
-                    .join('\\n');
-            }}
-
-            return `**${{role.charAt(0).toUpperCase() + role.slice(1)}}:**\\n\\n${{content}}`;
-        }}).join('\\n\\n---\\n\\n');
-    }}
-
-    // Current state for subtabs
-    let currentSubtabState = {{}};
-
-    // Switch subtab within an EGF tab
-    function switchSubTab(egfIdx, passNum, submissionId) {{
-        const tabContent = document.getElementById('tab-egf-' + egfIdx);
-        if (!tabContent) return;
-
-        // Update button states
-        tabContent.querySelectorAll('.subtab-btn').forEach(btn => {{
-            btn.classList.toggle('active', parseInt(btn.dataset.pass) === passNum);
-        }});
-
-        // Get LLM calls for this submission
-        const egfName = gradesData.egfNames[egfIdx];
-        const gradeDetail = gradesData.egfGrades[egfName]?.[submissionId];
-        if (!gradeDetail || !gradeDetail.llm_calls) return;
-
-        const call = gradeDetail.llm_calls.find(c => c.pass_number === passNum);
-        if (!call) return;
-
-        // Update call ID display
-        const callIdEl = tabContent.querySelector('.call-id-display');
-        if (callIdEl) {{
-            callIdEl.textContent = call.call_id;
-        }}
-
-        // Update LLM output display (comes first)
-        const llmOutputEl = tabContent.querySelector('.llm-output-content');
-        if (llmOutputEl) {{
-            const llmOutput = extractLLMOutput(call.raw_json);
-            if (llmOutput) {{
-                llmOutputEl.innerHTML = highlightMarkdownSource(llmOutput);
-            }} else {{
-                llmOutputEl.innerHTML = '<em class="text-gray">No output data found</em>';
-            }}
-        }}
-
-        // Update LLM input display (comes second)
-        const llmInputEl = tabContent.querySelector('.llm-input-content');
-        if (llmInputEl) {{
-            const llmInput = extractLLMInput(call.raw_json);
-            if (llmInput) {{
-                llmInputEl.innerHTML = highlightMarkdownSource(llmInput);
-            }} else {{
-                llmInputEl.innerHTML = '<em class="text-gray">No input data found</em>';
-            }}
-        }}
-
-        // Update JSON display
-        const jsonEl = tabContent.querySelector('.json-display');
-        if (jsonEl) {{
-            jsonEl.innerHTML = formatJsonWithHighlighting(call.raw_json);
-        }}
-
-        // Store current state
-        currentSubtabState[egfIdx] = {{ passNum, submissionId }};
-    }}
-
-    // Generate histogram SVG
-    function generateHistogramSVG(distribution, maxGrade, width, height) {{
-        width = width || 300;
-        height = height || 100;
-
-        if (!distribution || distribution.length === 0) {{
-            return '<em class="text-gray">No distribution data</em>';
-        }}
-
-        const barWidth = width / distribution.length;
-        const maxProb = Math.max(...distribution) || 1;
-        const chartHeight = height - 25;
-
-        let bars = '';
-        distribution.forEach((prob, i) => {{
-            const barHeight = (prob / maxProb) * chartHeight;
-            const x = i * barWidth;
-            const y = chartHeight - barHeight;
-            const opacity = prob > 0 ? 0.7 + (prob / maxProb) * 0.3 : 0.1;
-            bars += `<rect x="${{x}}" y="${{y}}" width="${{barWidth - 1}}" height="${{barHeight}}" fill="#3b82f6" opacity="${{opacity}}"/>`;
-            if (distribution.length <= 20) {{
-                bars += `<text x="${{x + barWidth/2}}" y="${{height - 5}}" text-anchor="middle" font-size="9" fill="#6b7280">${{i}}</text>`;
-            }}
-        }});
-
-        return `<svg width="${{width}}" height="${{height}}" xmlns="http://www.w3.org/2000/svg">
-            <rect width="100%" height="100%" fill="#f9fafb" rx="4"/>
-            ${{bars}}
-        </svg>`;
-    }}
-
-    // Open modal
-    function openModal(submissionId) {{
-        const submission = gradesData.submissions[submissionId];
-        if (!submission) return;
-
-        // Set title
-        const title = submission.student_name || submission.student_id || submissionId;
-        document.getElementById('modalTitle').textContent = title;
-
-        // Populate PDF tab
-        const pdfViewer = document.getElementById('pdfViewer');
-        const pdfFallback = document.getElementById('pdfFallback');
-        const pdfNotAvailable = document.getElementById('pdfNotAvailable');
-        const pdfDownloadLink = document.getElementById('pdfDownloadLink');
-
-        if (submission.pdf_base64) {{
-            const pdfDataUrl = 'data:application/pdf;base64,' + submission.pdf_base64;
-            pdfViewer.src = pdfDataUrl;
-            pdfViewer.style.display = 'block';
-            pdfFallback.style.display = 'none';
-            pdfNotAvailable.style.display = 'none';
-            pdfDownloadLink.href = pdfDataUrl;
-
-            // Handle PDF loading error (some browsers don't support inline PDFs)
-            pdfViewer.onerror = function() {{
-                pdfViewer.style.display = 'none';
-                pdfFallback.style.display = 'flex';
-            }};
-        }} else {{
-            pdfViewer.src = '';
-            pdfViewer.style.display = 'none';
-            pdfFallback.style.display = 'none';
-            pdfNotAvailable.style.display = 'flex';
-        }}
-
-        // Populate Essay tab
-        document.getElementById('essayContent').innerHTML = parseMarkdown(submission.essay_markdown);
-
-        // Populate Ground Truth tab
-        const gtGrade = submission.ground_truth_grade;
-        document.getElementById('gtGradeValue').textContent = gtGrade !== null ? gtGrade : 'N/A';
-        document.getElementById('gtGradeMax').textContent = '/ ' + gradesData.maxGrade;
-
-        const gtHistContainer = document.getElementById('gtHistogram');
-        if (submission.gt_distribution) {{
-            document.getElementById('gtNoiseLabel').textContent = gradesData.noiseAssumption + ' noise';
-            gtHistContainer.innerHTML = generateHistogramSVG(submission.gt_distribution, gradesData.maxGrade, 400, 120);
-        }} else {{
-            gtHistContainer.innerHTML = '<em class="text-gray">No distribution data available</em>';
-        }}
-
-        // Populate GT justification
-        const gtJustificationEl = document.getElementById('gtJustification');
-        if (gtJustificationEl) {{
-            gtJustificationEl.innerHTML = submission.gt_justification
-                ? parseMarkdown(submission.gt_justification)
-                : '<em class="text-gray">No justification provided</em>';
-        }}
-
-        // Populate EGF tabs
-        gradesData.egfNames.forEach((egfName, idx) => {{
-            const tabContent = document.getElementById('tab-egf-' + idx);
-            if (!tabContent) return;
-
-            const gradeDetail = gradesData.egfGrades[egfName]?.[submissionId];
-            const gradeValueEl = tabContent.querySelector('.egf-grade-value');
-            const histContainer = tabContent.querySelector('.egf-histogram');
-            const justificationEl = tabContent.querySelector('.egf-justification');
-            const subtabsContainer = tabContent.querySelector('.subtabs');
-            const llmCallsSection = tabContent.querySelector('.llm-calls-section');
-
-            if (gradeDetail) {{
-                gradeValueEl.textContent = gradeDetail.grade;
-                histContainer.innerHTML = generateHistogramSVG(gradeDetail.grade_distribution, gradesData.maxGrade, 400, 120);
-                justificationEl.innerHTML = gradeDetail.justification
-                    ? parseMarkdown(gradeDetail.justification)
-                    : '<em class="text-gray">No justification provided</em>';
-
-                // Populate LLM calls subtabs
-                if (gradeDetail.llm_calls && gradeDetail.llm_calls.length > 0 && subtabsContainer) {{
-                    subtabsContainer.innerHTML = '';
-                    gradeDetail.llm_calls.forEach((call, callIdx) => {{
-                        const btn = document.createElement('button');
-                        btn.className = 'subtab-btn' + (callIdx === 0 ? ' active' : '');
-                        btn.dataset.pass = call.pass_number;
-                        btn.textContent = (call.pass_number + 1).toString();
-                        btn.title = call.call_id;
-                        btn.onclick = () => switchSubTab(idx, call.pass_number, submissionId);
-                        subtabsContainer.appendChild(btn);
-                    }});
-
-                    // Show first call by default
-                    if (llmCallsSection) {{
-                        llmCallsSection.style.display = 'block';
-                    }}
-                    switchSubTab(idx, gradeDetail.llm_calls[0].pass_number, submissionId);
-                }} else if (llmCallsSection) {{
-                    llmCallsSection.style.display = 'none';
-                }}
-            }} else {{
-                gradeValueEl.textContent = 'N/A';
-                histContainer.innerHTML = '<em class="text-gray">Not graded</em>';
-                justificationEl.innerHTML = '<em class="text-gray">No data available</em>';
-                if (llmCallsSection) {{
-                    llmCallsSection.style.display = 'none';
-                }}
-            }}
-        }});
-
-        // Show first tab
-        switchTab('essay');
-
-        // Show modal
-        document.getElementById('gradeModal').classList.add('active');
-        document.body.style.overflow = 'hidden';
-    }}
-
-    // Close modal
-    function closeModal() {{
-        document.getElementById('gradeModal').classList.remove('active');
-        document.body.style.overflow = '';
-    }}
-
-    // Switch tab
-    function switchTab(tabId) {{
-        document.querySelectorAll('.tab-btn').forEach(btn => {{
-            btn.classList.toggle('active', btn.dataset.tab === tabId);
-        }});
-        document.querySelectorAll('.tab-content').forEach(content => {{
-            content.classList.toggle('active', content.id === 'tab-' + tabId);
-        }});
-    }}
-
-    // Event listeners
-    document.addEventListener('DOMContentLoaded', function() {{
-        // Table row clicks
-        document.querySelectorAll('.grade-row').forEach(row => {{
-            row.addEventListener('click', () => openModal(row.dataset.submissionId));
-        }});
-
-        // Tab clicks
-        document.querySelectorAll('.tab-btn').forEach(btn => {{
-            btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-        }});
-
-        // Close button
-        document.querySelector('.modal-close')?.addEventListener('click', closeModal);
-
-        // Close on overlay click
-        document.getElementById('gradeModal')?.addEventListener('click', (e) => {{
-            if (e.target.classList.contains('modal-overlay')) closeModal();
-        }});
-
-        // Close on Escape
-        document.addEventListener('keydown', (e) => {{
-            if (e.key === 'Escape') closeModal();
-        }});
-    }});
-
-    // Expose functions globally
-    window.openModal = openModal;
-    window.closeModal = closeModal;
-    window.switchTab = switchTab;
-}})();
-</script>
-'''
-
-
-def generate_grades_table_section(grades_table: GradesTableData) -> str:
-    """Generate the HTML for the grades table section."""
-    # Build table header
-    header_cells = ['<th>Student</th>', '<th>GT</th>']
-    for egf_name in grades_table.egf_names:
-        label = grades_table.egf_labels.get(egf_name, egf_name)
-        header_cells.append(f'<th title="{egf_name}">{label}</th>')
-
-    # Build table rows
-    rows = []
-    for sid, submission in grades_table.submissions.items():
-        student_display = submission.student_name or submission.student_id or sid
-        gt_grade = submission.ground_truth_grade
-        gt_display = str(gt_grade) if gt_grade is not None else '-'
-
-        cells = [
-            f'<td>{student_display}</td>',
-            f'<td class="grade-cell">{gt_display}</td>',
-        ]
-
-        for egf_name in grades_table.egf_names:
-            egf_grade = grades_table.egf_grades.get(egf_name, {}).get(sid)
-            if egf_grade:
-                grade = egf_grade.grade
-                # Color based on difference from ground truth
-                css_class = 'grade-cell'
-                if gt_grade is not None:
-                    diff = abs(grade - gt_grade)
-                    if diff == 0:
-                        css_class += ' grade-match'
-                    elif diff == 1:
-                        css_class += ' grade-close'
-                    else:
-                        css_class += ' grade-far'
-                cells.append(f'<td class="{css_class}">{grade}</td>')
-            else:
-                cells.append('<td class="grade-cell">-</td>')
-
-        rows.append(f'<tr class="grade-row" data-submission-id="{sid}">{"".join(cells)}</tr>')
-
-    return f'''
-    <section class="grades-section">
-        <h2>Grades by Submission</h2>
-        <p style="color: var(--gray-600); font-size: 0.875rem; margin-bottom: 1rem;">
-            Click a row to view details. Colors: <span style="color: var(--success);">exact match</span>,
-            <span style="color: var(--warning);">within 1</span>,
-            <span style="color: var(--danger);">2+ difference</span>
-        </p>
-        <div class="table-container">
-            <table class="grades-table">
-                <thead>
-                    <tr>{"".join(header_cells)}</tr>
-                </thead>
-                <tbody>
-                    {"".join(rows)}
-                </tbody>
-            </table>
-        </div>
-    </section>
-    '''
-
-
-def generate_modal_html(grades_table: GradesTableData) -> str:
-    """Generate the HTML for the modal popup."""
-    # Build tab buttons
-    tab_buttons = [
-        '<button class="tab-btn active" data-tab="essay">Essay</button>',
-        '<button class="tab-btn" data-tab="pdf">PDF</button>',
-        '<button class="tab-btn" data-tab="gt">Ground Truth</button>',
-    ]
-    for idx, egf_name in enumerate(grades_table.egf_names):
-        label = grades_table.egf_labels.get(egf_name, egf_name)
-        tab_buttons.append(f'<button class="tab-btn" data-tab="egf-{idx}" title="{egf_name}">{label}</button>')
-
-    # Build tab contents
-    egf_tab_contents = []
-    for idx, egf_name in enumerate(grades_table.egf_names):
-        label = grades_table.egf_labels.get(egf_name, egf_name)
-        egf_tab_contents.append(f'''
-            <div class="tab-content" id="tab-egf-{idx}">
-                <div class="grade-display">
-                    <span class="grade-value egf-grade-value">-</span>
-                    <span class="grade-max">/ {grades_table.max_grade}</span>
-                </div>
-                <div class="histogram-section">
-                    <h4>Grade Distribution</h4>
-                    <div class="histogram-container egf-histogram"></div>
-                </div>
-                <div class="justification-section">
-                    <h4>Justification</h4>
-                    <div class="markdown-content egf-justification"></div>
-                </div>
-                <div class="llm-calls-section">
-                    <h4>LLM Calls</h4>
-                    <div class="subtabs"></div>
-                    <div class="call-id-display"></div>
-                    <div class="llm-output-section">
-                        <h5>LLM Output</h5>
-                        <div class="llm-output-content"></div>
-                    </div>
-                    <div class="llm-input-section">
-                        <h5>LLM Input</h5>
-                        <div class="llm-input-content"></div>
-                    </div>
-                    <div class="llm-json-section">
-                        <h5>Raw JSON</h5>
-                        <pre class="json-display"></pre>
-                    </div>
-                </div>
-            </div>
-        ''')
-
-    return f'''
-    <div class="modal-overlay" id="gradeModal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3 id="modalTitle">Student Details</h3>
-                <button class="modal-close" aria-label="Close">&times;</button>
-            </div>
-            <div class="modal-tabs">
-                {"".join(tab_buttons)}
-            </div>
-            <div class="modal-body">
-                <div class="tab-content active" id="tab-essay">
-                    <div class="markdown-content" id="essayContent"></div>
-                </div>
-                <div class="tab-content" id="tab-pdf">
-                    <div class="pdf-container" id="pdfContainer">
-                        <iframe id="pdfViewer" class="pdf-viewer"></iframe>
-                        <div id="pdfFallback" class="pdf-fallback" style="display: none;">
-                            <p>PDF preview not available.</p>
-                            <a id="pdfDownloadLink" href="#" download="submission.pdf" class="pdf-download-btn">Download PDF</a>
-                        </div>
-                        <div id="pdfNotAvailable" class="pdf-not-available" style="display: none;">
-                            <em class="text-gray">No PDF available for this submission</em>
-                        </div>
-                    </div>
-                </div>
-                <div class="tab-content" id="tab-gt">
-                    <div class="grade-display">
-                        <span class="grade-value" id="gtGradeValue">-</span>
-                        <span class="grade-max" id="gtGradeMax">/ -</span>
-                    </div>
-                    <div class="histogram-section">
-                        <h4>Teacher Noise Distribution (<span id="gtNoiseLabel">expected</span>)</h4>
-                        <div class="histogram-container" id="gtHistogram"></div>
-                    </div>
-                    <div class="justification-section">
-                        <h4>Justification</h4>
-                        <div class="markdown-content" id="gtJustification"></div>
-                    </div>
-                </div>
-                {"".join(egf_tab_contents)}
-            </div>
-        </div>
-    </div>
+        /* Comparison Table Cells */
+        .comparison-sub-cell {
+            cursor: pointer;
+            color: var(--primary);
+        }
+        .comparison-sub-cell:hover {
+            text-decoration: underline;
+        }
+
+        /* Comparison Pair Modal */
+        .comparison-pair-header {
+            display: flex;
+            justify-content: center;
+            align-items: stretch;
+            gap: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .comparison-essay-card {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 1.25rem 2rem;
+            border: 2px solid var(--gray-200);
+            border-radius: 12px;
+            min-width: 180px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .comparison-essay-card:hover {
+            border-color: var(--primary);
+            background: rgba(59, 130, 246, 0.05);
+        }
+        .comparison-essay-card .essay-label {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.25rem;
+        }
+        .comparison-essay-card .essay-name {
+            font-weight: 600;
+            font-size: 1.1rem;
+            color: var(--gray-800);
+            margin-bottom: 0.5rem;
+        }
+        .comparison-essay-card .essay-name.clickable {
+            color: var(--primary);
+        }
+        .comparison-essay-card .essay-grade {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+        }
+        .comparison-essay-card .gt-winner-badge {
+            margin-top: 0.5rem;
+            font-size: 0.7rem;
+            padding: 0.2rem 0.5rem;
+            background: var(--success);
+            color: white;
+            border-radius: 4px;
+        }
+        .vs-divider {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.25rem;
+        }
+        .vs-divider .vs-text {
+            font-size: 1.25rem;
+            font-weight: bold;
+            color: var(--gray-400);
+        }
+        .vs-divider .gap-text {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+        }
+        .gt-tie-notice {
+            text-align: center;
+            padding: 0.75rem;
+            background: var(--gray-100);
+            border-radius: 8px;
+            color: var(--gray-600);
+            font-size: 0.875rem;
+            margin-bottom: 1.5rem;
+        }
+        .egf-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--gray-200);
+        }
+        .comparison-result-section {
+            margin-top: 1rem;
+        }
+        .comparison-result-section h4 {
+            font-size: 1rem;
+            color: var(--gray-800);
+            margin-bottom: 1rem;
+        }
+        .result-summary {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            font-size: 1.1rem;
+        }
+        .result-summary .result-label {
+            color: var(--gray-600);
+        }
+        .result-summary .result-value {
+            font-weight: 600;
+            color: var(--gray-900);
+        }
+        .result-summary .result-value.correct {
+            color: var(--success);
+        }
+        .result-summary .result-value.incorrect {
+            color: var(--danger);
+        }
+        .result-summary .check-mark {
+            color: var(--success);
+        }
+        .result-summary .cross-mark {
+            color: var(--danger);
+        }
+        .result-summary .result-confidence {
+            font-size: 0.875rem;
+            color: var(--gray-500);
+        }
     '''
 
 

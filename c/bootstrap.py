@@ -326,6 +326,173 @@ def bootstrap_qwk_combined(
     return _compute_ci(qwk_scores, confidence_level)
 
 
+def bootstrap_comparison_accuracy(
+    comparisons: list[tuple[int, int, str]],
+    teacher_noise: TeacherNoiseModel,
+    n_iterations: int = 1000,
+    seed: int = 42,
+    confidence_level: float = 0.95,
+    min_grade: int = 0,
+    max_grade: int = 40,
+) -> tuple[float, float, float]:
+    """Bootstrap comparison accuracy with GT noise.
+
+    For each iteration:
+    1. Apply GT noise to both grades in each comparison
+    2. If noised grades are equal -> EXCLUDE from this iteration
+    3. Check if winner matches grade ordering (A wins if gt_a > gt_b)
+    4. Compute accuracy = correct / valid_count
+
+    Args:
+        comparisons: List of (gt_a, gt_b, winner) tuples where winner is "A", "B", or "tie"
+        teacher_noise: Teacher noise model (deviation -> probability)
+        n_iterations: Number of bootstrap iterations
+        seed: Random seed
+        confidence_level: Confidence level for CI (default 0.95)
+        min_grade: Minimum possible grade
+        max_grade: Maximum possible grade
+
+    Returns:
+        Tuple of (mean_accuracy, lower_ci, upper_ci)
+    """
+    if not comparisons:
+        return float('nan'), float('nan'), float('nan')
+
+    rng = np.random.default_rng(seed)
+    accuracies = []
+
+    for _ in range(n_iterations):
+        correct = 0
+        valid = 0
+
+        for gt_a, gt_b, winner in comparisons:
+            # Apply GT noise to both grades
+            noised_a = apply_gt_noise(gt_a, rng, teacher_noise, min_grade, max_grade)
+            noised_b = apply_gt_noise(gt_b, rng, teacher_noise, min_grade, max_grade)
+
+            # Skip if grades are now equal (can't determine correctness)
+            if noised_a == noised_b:
+                continue
+
+            valid += 1
+
+            # Determine expected winner based on noised grades
+            expected_winner = "A" if noised_a > noised_b else "B"
+
+            # Check if prediction is correct
+            if winner == expected_winner:
+                correct += 1
+            elif winner == "tie":
+                # Ties are incorrect when there's a clear winner after noise
+                pass
+
+        if valid > 0:
+            accuracies.append(correct / valid)
+
+    return _compute_ci(accuracies, confidence_level)
+
+
+def bootstrap_comparison_accuracy_paired(
+    by_idx: dict[int, list[tuple[int, int, str]]],
+    teacher_noise: TeacherNoiseModel,
+    n_iterations: int = 2000,
+    seed: int = 42,
+    min_grade: int = 0,
+    max_grade: int = 40,
+) -> tuple[dict[tuple[int, int], float], dict[int, float]]:
+    """Paired bootstrap for comparison accuracy across multiple EGF files.
+
+    Uses the SAME GT noise per essay across all files in each iteration,
+    allowing fair comparison of which file's comparisons are more accurate.
+
+    Args:
+        by_idx: Dict mapping file index -> list of (gt_a, gt_b, winner) tuples
+        teacher_noise: Teacher noise model (deviation -> probability)
+        n_iterations: Number of bootstrap iterations
+        seed: Random seed
+        min_grade: Minimum possible grade
+        max_grade: Maximum possible grade
+
+    Returns:
+        Tuple of (win_matrix, avg_accuracy_by_idx)
+        win_matrix: Dict mapping (i, j) -> P(file i has higher accuracy than file j)
+        avg_accuracy_by_idx: Dict mapping file index -> average accuracy
+    """
+    rng = np.random.default_rng(seed)
+    indices_list = sorted(by_idx.keys())
+
+    # Collect all unique (gt_a, gt_b) pairs across all files for noise caching
+    # We cache by the original grades since they determine the noise
+    all_grade_pairs: set[tuple[int, int]] = set()
+    for idx in indices_list:
+        for gt_a, gt_b, _ in by_idx[idx]:
+            all_grade_pairs.add((gt_a, gt_b))
+
+    win_counts: dict[tuple[int, int], int] = {}
+    valid_comparisons: dict[tuple[int, int], int] = {}
+    accuracy_sums: dict[int, float] = {idx: 0.0 for idx in indices_list}
+    accuracy_counts: dict[int, int] = {idx: 0 for idx in indices_list}
+
+    for i in indices_list:
+        for j in indices_list:
+            win_counts[(i, j)] = 0
+            valid_comparisons[(i, j)] = 0
+
+    for _ in range(n_iterations):
+        # Generate GT noise for all grade pairs (shared across files)
+        gt_noise_cache: dict[tuple[int, int], tuple[int, int]] = {}
+        for gt_a, gt_b in all_grade_pairs:
+            noised_a = apply_gt_noise(gt_a, rng, teacher_noise, min_grade, max_grade)
+            noised_b = apply_gt_noise(gt_b, rng, teacher_noise, min_grade, max_grade)
+            gt_noise_cache[(gt_a, gt_b)] = (noised_a, noised_b)
+
+        accuracies: dict[int, float] = {}
+
+        for idx in indices_list:
+            correct = 0
+            valid = 0
+
+            for gt_a, gt_b, winner in by_idx[idx]:
+                noised_a, noised_b = gt_noise_cache[(gt_a, gt_b)]
+
+                # Skip if grades are now equal
+                if noised_a == noised_b:
+                    continue
+
+                valid += 1
+                expected_winner = "A" if noised_a > noised_b else "B"
+
+                if winner == expected_winner:
+                    correct += 1
+
+            if valid > 0:
+                acc = correct / valid
+                accuracies[idx] = acc
+                accuracy_sums[idx] += acc
+                accuracy_counts[idx] += 1
+            else:
+                accuracies[idx] = float('nan')
+
+        # Record pairwise wins
+        for i in indices_list:
+            for j in indices_list:
+                if not np.isnan(accuracies.get(i, float('nan'))) and not np.isnan(accuracies.get(j, float('nan'))):
+                    valid_comparisons[(i, j)] += 1
+                    if accuracies[i] > accuracies[j]:
+                        win_counts[(i, j)] += 1
+
+    win_matrix = {
+        k: v / valid_comparisons[k] if valid_comparisons[k] > 0 else float('nan')
+        for k, v in win_counts.items()
+    }
+    avg_accuracy_by_idx = {
+        idx: accuracy_sums[idx] / accuracy_counts[idx] if accuracy_counts[idx] > 0 else float('nan')
+        for idx in indices_list
+    }
+
+    return win_matrix, avg_accuracy_by_idx
+
+
 def get_default_stability_vector() -> StabilityVector:
     """Get a default grading stability vector."""
     return {

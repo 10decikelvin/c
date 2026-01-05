@@ -77,15 +77,15 @@ wheels = [
 [[package]]
 name = "edf"
 version = "0.3.0"
-source = { git = "https://github.com/Edexia/edf#1306d3a01f23d6ee4b42aae7039c5915149123bc" }
+source = { git = "https://github.com/Edexia/edf#3cf7acf105d243231b05c3ad9b90b629c98af823" }
 dependencies = [
     { name = "pydantic" },
 ]
 
 [[package]]
 name = "egf"
-version = "0.3.1"
-source = { git = "https://github.com/Edexia/egf#56055a7d4c141e6a13e3fc23986d2800ce4737f4" }
+version = "0.4.0"
+source = { git = "https://github.com/Edexia/egf#4b1fac0120ab53ac104ddc877eea2afd7a1072e7" }
 dependencies = [
     { name = "edf" },
     { name = "fastapi" },
